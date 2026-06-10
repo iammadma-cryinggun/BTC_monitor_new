@@ -73,8 +73,10 @@ impl FuturesTrader {
 
             // 1. 如果有持仓，检查止损止盈
             if self.risk_manager.has_position() {
-                let ob = self.orderbook.read().await;
-                let current_price = (ob.best_bid + ob.best_ask) / 2.0;
+                let current_price = {
+                    let ob = self.orderbook.read().await;
+                    (ob.best_bid + ob.best_ask) / 2.0
+                }; // ob在这里被释放
 
                 let (should_close, reason) = self.risk_manager.check_stop_conditions(current_price);
                 if should_close {
@@ -85,20 +87,21 @@ impl FuturesTrader {
 
             // 2. 如果没有持仓，生成信号
             if !self.risk_manager.has_position() {
-                let ob = self.orderbook.read().await;
-                let obi = SignalEngine::calculate_obi(ob.bids_volume, ob.asks_volume);
-                let current_price = (ob.best_bid + ob.best_ask) / 2.0;
+                let (current_price, obi) = {
+                    let ob = self.orderbook.read().await;
+                    let obi = SignalEngine::calculate_obi(ob.bids_volume, ob.asks_volume);
+                    let price = (ob.best_bid + ob.best_ask) / 2.0;
+                    (price, obi)
+                }; // ob在这里被释放
 
-                // 生成信号 (diff使用OBI方向作为代替)
-                let diff = obi * 100.0; // 简化：用OBI映射到diff
-                let time = 30.0; // 合约无时间限制，使用中间值
-
+                // 生成信号
+                let diff = obi * 100.0;
+                let time = 30.0;
                 let signal = self.signal_engine.generate_signal(obi, diff, time);
 
                 if signal != TradeSignal::None {
                     // OBI反转检查
-                    let current_obi = SignalEngine::calculate_obi(ob.bids_volume, ob.asks_volume);
-                    if self.signal_engine.check_obi_reversal(&signal, current_obi) {
+                    if self.signal_engine.check_obi_reversal(&signal, obi) {
                         self.open_position(signal, current_price).await;
                     }
                 }

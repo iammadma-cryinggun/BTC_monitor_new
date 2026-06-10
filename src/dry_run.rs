@@ -115,43 +115,47 @@ impl DryRunTrader {
         while self.is_running {
             interval.tick().await;
 
-            // 获取当前价格
-            let ob = self.orderbook.read().await;
-            let current_price = (ob.best_bid + ob.best_ask) / 2.0;
-            let obi = SignalEngine::calculate_obi(ob.bids_volume, ob.asks_volume);
+            // 获取当前价格 - 提取数据后立即释放锁
+            let (current_price, obi) = {
+                let ob = self.orderbook.read().await;
+                let price = (ob.best_bid + ob.best_ask) / 2.0;
+                let obi_val = SignalEngine::calculate_obi(ob.bids_volume, ob.asks_volume);
+                (price, obi_val)
+            }; // ob在这里被释放
 
             // 1. 如果有持仓，检查止损止盈
-            if let Some(ref mut pos) = self.position {
-                // 更新最高/最低价
-                if current_price > pos.highest_price {
-                    pos.highest_price = current_price;
+            let should_close = {
+                if let Some(ref mut pos) = self.position {
+                    // 更新最高/最低价
+                    if current_price > pos.highest_price {
+                        pos.highest_price = current_price;
+                    }
+                    if current_price < pos.lowest_price {
+                        pos.lowest_price = current_price;
+                    }
+
+                    // 计算盈亏
+                    let pnl_pct = match pos.side.as_str() {
+                        "LONG" => (current_price - pos.entry_price) / pos.entry_price,
+                        "SHORT" => (pos.entry_price - current_price) / pos.entry_price,
+                        _ => 0.0,
+                    };
+
+                    let hold_time = chrono::Utc::now().timestamp() - pos.entry_time;
+
+                    // 检查平仓条件
+                    self.check_close_conditions(pnl_pct, hold_time, current_price, pos)
+                } else {
+                    None
                 }
-                if current_price < pos.lowest_price {
-                    pos.lowest_price = current_price;
-                }
+            };
 
-                // 计算盈亏
-                let pnl_pct = match pos.side.as_str() {
-                    "LONG" => (current_price - pos.entry_price) / pos.entry_price,
-                    "SHORT" => (pos.entry_price - current_price) / pos.entry_price,
-                    _ => 0.0,
-                };
-
-                let hold_time = chrono::Utc::now().timestamp() - pos.entry_time;
-
-                // 检查平仓条件
-                let should_close = self.check_close_conditions(
-                    pnl_pct, hold_time, current_price, pos
-                );
-
-                if let Some(reason) = should_close {
-                    self.close_position(current_price, reason).await;
-                }
+            if let Some(reason) = should_close {
+                self.close_position(current_price, reason).await;
             }
 
             // 2. 如果没有持仓，生成信号
             if self.position.is_none() {
-                // 生成信号
                 let diff = obi * 100.0;
                 let time = 30.0;
                 let signal = self.signal_engine.generate_signal(obi, diff, time);
