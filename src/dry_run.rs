@@ -173,44 +173,63 @@ impl DryRunTrader {
 
         let hold_time = chrono::Utc::now().timestamp() - pos.entry_time;
 
-        self.check_close_conditions(pnl_pct, hold_time, current_price, pos)
+        // 提取pos的引用数据
+        let side = pos.side.clone();
+        let highest_price = pos.highest_price;
+        let lowest_price = pos.lowest_price;
+
+        // 在这里drop pos的借用
+        drop(pos);
+
+        // 现在可以调用self方法
+        Self::check_close_conditions_static(
+            pnl_pct,
+            hold_time,
+            current_price,
+            &side,
+            highest_price,
+            lowest_price,
+            &self.config.risk,
+        )
     }
 
-    /// 检查平仓条件
-    fn check_close_conditions(
-        &self,
+    /// 静态检查平仓条件
+    fn check_close_conditions_static(
         pnl_pct: f64,
         hold_time: i64,
         current_price: f64,
-        pos: &SimPosition,
+        side: &str,
+        highest_price: f64,
+        lowest_price: f64,
+        risk_config: &crate::config::RiskConfig,
     ) -> Option<String> {
         // 超时平仓
-        if hold_time > self.config.risk.max_hold_time_secs as i64 {
+        if hold_time > risk_config.max_hold_time_secs as i64 {
             return Some("超时".to_string());
         }
 
         // 止盈
-        if pnl_pct >= self.config.risk.take_profit_pct {
+        if pnl_pct >= risk_config.take_profit_pct {
             return Some("止盈".to_string());
         }
 
         // 止损
-        if pnl_pct <= -self.config.risk.stop_loss_pct {
+        if pnl_pct <= -risk_config.stop_loss_pct {
             return Some("止损".to_string());
         }
 
         // 移动止损
-        if self.config.risk.trailing_stop && pnl_pct > 0.0 {
-            let trailing_pct = self.config.risk.trailing_stop_pct;
-            match pos.side.as_str() {
+        if risk_config.trailing_stop && pnl_pct > 0.0 {
+            let trailing_pct = risk_config.trailing_stop_pct;
+            match side {
                 "LONG" => {
-                    let trailing_stop = pos.highest_price * (1.0 - trailing_pct);
+                    let trailing_stop = highest_price * (1.0 - trailing_pct);
                     if current_price <= trailing_stop {
                         return Some("移动止损".to_string());
                     }
                 }
                 "SHORT" => {
-                    let trailing_stop = pos.lowest_price * (1.0 + trailing_pct);
+                    let trailing_stop = lowest_price * (1.0 + trailing_pct);
                     if current_price >= trailing_stop {
                         return Some("移动止损".to_string());
                     }
