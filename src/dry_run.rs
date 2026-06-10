@@ -203,8 +203,8 @@ impl DryRunTrader {
         lowest_price: f64,
         risk_config: &crate::config::RiskConfig,
     ) -> Option<String> {
-        // 超时平仓
-        if hold_time > risk_config.max_hold_time_secs as i64 {
+        // 超时平仓（0表示无限制）
+        if risk_config.max_hold_time_secs > 0 && hold_time > risk_config.max_hold_time_secs as i64 {
             return Some("超时".to_string());
         }
 

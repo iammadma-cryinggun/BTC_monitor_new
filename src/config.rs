@@ -146,7 +146,7 @@ impl Config {
             risk: RiskConfig {
                 stop_loss_pct: 0.02,
                 take_profit_pct: 0.01,
-                max_hold_time_secs: 300,
+                max_hold_time_secs: 0,  // 0 = 无限制
                 trailing_stop: true,
                 trailing_stop_pct: 0.005,
             },
