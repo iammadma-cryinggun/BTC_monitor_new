@@ -1,0 +1,12 @@
+# Zeabur 部署配置
+services:
+  - name: btc-futures-sniper
+    type: docker
+    dockerfile: Dockerfile
+    env:
+      DRY_RUN: "true"
+      INITIAL_BALANCE: "1000"
+      TELEGRAM_ENABLED: "true"
+    volumes:
+      - name: data
+        mountPath: /app/data

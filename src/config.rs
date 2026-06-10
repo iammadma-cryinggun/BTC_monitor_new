@@ -66,9 +66,61 @@ pub struct LoggingConfig {
 
 impl Config {
     pub fn load(path: &str) -> Result<Self, Box<dyn std::error::Error>> {
-        let content = std::fs::read_to_string(path)?;
-        let config: Config = toml::from_str(&content)?;
-        Ok(config)
+        // 先尝试从文件加载
+        if std::path::Path::new(path).exists() {
+            let content = std::fs::read_to_string(path)?;
+            let mut config: Config = toml::from_str(&content)?;
+            // 用环境变量覆盖
+            config.apply_env_overrides();
+            Ok(config)
+        } else {
+            // 没有配置文件，使用默认值+环境变量
+            let mut config = Self::default();
+            config.apply_env_overrides();
+            Ok(config)
+        }
+    }
+
+    /// 从环境变量覆盖配置
+    fn apply_env_overrides(&mut self) {
+        // Telegram
+        if let Ok(token) = std::env::var("TELEGRAM_BOT_TOKEN") {
+            self.telegram.bot_token = token;
+        }
+        if let Ok(chat_id) = std::env::var("TELEGRAM_CHAT_ID") {
+            self.telegram.chat_id = chat_id;
+        }
+        if let Ok(enabled) = std::env::var("TELEGRAM_ENABLED") {
+            self.telegram.enabled = enabled == "true";
+        }
+
+        // Trading
+        if let Ok(dry_run) = std::env::var("DRY_RUN") {
+            self.trading.dry_run = dry_run == "true";
+        }
+        if let Ok(balance) = std::env::var("INITIAL_BALANCE") {
+            if let Ok(b) = balance.parse() {
+                self.trading.initial_balance = b;
+            }
+        }
+        if let Ok(leverage) = std::env::var("LEVERAGE") {
+            if let Ok(l) = leverage.parse() {
+                self.trading.leverage = l;
+            }
+        }
+
+        // Binance
+        if let Ok(key) = std::env::var("BINANCE_API_KEY") {
+            self.binance.api_key = key;
+        }
+        if let Ok(secret) = std::env::var("BINANCE_API_SECRET") {
+            self.binance.api_secret = secret;
+        }
+
+        // Database
+        if let Ok(db_path) = std::env::var("DATABASE_PATH") {
+            self.database.path = db_path;
+        }
     }
 
     pub fn default() -> Self {
