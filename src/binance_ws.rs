@@ -1,11 +1,11 @@
 // ─────────────────────────────────────────────────────────────
 // Binance WebSocket - 订单簿数据流
 // 正确实现：先获取REST快照，再应用WebSocket增量更新
+// 使用数值排序确保价格正确
 // ─────────────────────────────────────────────────────────────
 
 use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
-use std::collections::BTreeMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
@@ -62,11 +62,74 @@ impl Default for OrderBook {
     }
 }
 
-/// 内部订单簿（使用BTreeMap维护价格排序）
+/// 价格档位（用于正确排序）
+#[derive(Debug, Clone)]
+struct PriceLevel {
+    price: f64,
+    quantity: f64,
+}
+
+/// 内部订单簿（使用Vec维护，手动排序）
 struct InternalOrderBook {
-    bids: BTreeMap<String, f64>,  // price -> quantity (降序需要反转)
-    asks: BTreeMap<String, f64>,  // price -> quantity (升序)
+    bids: Vec<PriceLevel>,  // 降序排列（最高价在前）
+    asks: Vec<PriceLevel>,  // 升序排列（最低价在前）
     last_update_id: i64,
+}
+
+impl InternalOrderBook {
+    fn new() -> Self {
+        Self {
+            bids: Vec::new(),
+            asks: Vec::new(),
+            last_update_id: 0,
+        }
+    }
+
+    /// 更新买单列表
+    fn update_bid(&mut self, price: f64, qty: f64) {
+        // 移除旧的价格档位
+        self.bids.retain(|l| l.price != price);
+
+        if qty > 0.0 {
+            // 插入新档位
+            self.bids.push(PriceLevel { price, quantity: qty });
+            // 降序排序（最高价在前）
+            self.bids.sort_by(|a, b| b.price.partial_cmp(&a.price).unwrap_or(std::cmp::Ordering::Equal));
+        }
+    }
+
+    /// 更新卖单列表
+    fn update_ask(&mut self, price: f64, qty: f64) {
+        // 移除旧的价格档位
+        self.asks.retain(|l| l.price != price);
+
+        if qty > 0.0 {
+            // 插入新档位
+            self.asks.push(PriceLevel { price, quantity: qty });
+            // 升序排序（最低价在前）
+            self.asks.sort_by(|a, b| a.price.partial_cmp(&b.price).unwrap_or(std::cmp::Ordering::Equal));
+        }
+    }
+
+    /// 获取最佳买价（最高）
+    fn best_bid(&self) -> Option<f64> {
+        self.bids.first().map(|l| l.price)
+    }
+
+    /// 获取最佳卖价（最低）
+    fn best_ask(&self) -> Option<f64> {
+        self.asks.first().map(|l| l.price)
+    }
+
+    /// 获取前N档买单总量
+    fn top_bids_volume(&self, n: usize) -> f64 {
+        self.bids.iter().take(n).map(|l| l.quantity).sum()
+    }
+
+    /// 获取前N档卖单总量
+    fn top_asks_volume(&self, n: usize) -> f64 {
+        self.asks.iter().take(n).map(|l| l.quantity).sum()
+    }
 }
 
 /// Binance WebSocket客户端
@@ -80,11 +143,7 @@ impl BinanceWsClient {
     pub fn new(symbol: &str) -> Self {
         Self {
             orderbook: Arc::new(RwLock::new(OrderBook::default())),
-            internal: Arc::new(RwLock::new(InternalOrderBook {
-                bids: BTreeMap::new(),
-                asks: BTreeMap::new(),
-                last_update_id: 0,
-            })),
+            internal: Arc::new(RwLock::new(InternalOrderBook::new())),
             symbol: symbol.to_uppercase(),
         }
     }
@@ -123,26 +182,29 @@ impl BinanceWsClient {
 
             for bid in snapshot.bids {
                 if bid.len() >= 2 {
-                    let price = bid[0].clone();
+                    let price: f64 = bid[0].parse().unwrap_or(0.0);
                     let qty: f64 = bid[1].parse().unwrap_or(0.0);
-                    if qty > 0.0 {
-                        internal.bids.insert(price, qty);
+                    if price > 0.0 && qty > 0.0 {
+                        internal.update_bid(price, qty);
                     }
                 }
             }
 
             for ask in snapshot.asks {
                 if ask.len() >= 2 {
-                    let price = ask[0].clone();
+                    let price: f64 = ask[0].parse().unwrap_or(0.0);
                     let qty: f64 = ask[1].parse().unwrap_or(0.0);
-                    if qty > 0.0 {
-                        internal.asks.insert(price, qty);
+                    if price > 0.0 && qty > 0.0 {
+                        internal.update_ask(price, qty);
                     }
                 }
             }
 
-            info!("[Binance] 订单簿初始化: {} bids, {} asks",
-                  internal.bids.len(), internal.asks.len());
+            // 打印初始化后的最佳价格（用于验证）
+            if let (Some(bid), Some(ask)) = (internal.best_bid(), internal.best_ask()) {
+                info!("[Binance] 订单簿初始化: {} bids, {} asks, best_bid={}, best_ask={}",
+                      internal.bids.len(), internal.asks.len(), bid, ask);
+            }
         }
 
         // 3. 连接WebSocket
@@ -163,6 +225,7 @@ impl BinanceWsClient {
 
         // 心跳任务
         let heartbeat_orderbook = orderbook.clone();
+        let heartbeat_internal = internal.clone();
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(30));
             loop {
@@ -172,10 +235,10 @@ impl BinanceWsClient {
                     break;
                 }
                 let ob = heartbeat_orderbook.read().await;
+                let internal = heartbeat_internal.read().await;
                 if ob.is_valid {
-                    debug!("[心跳] 订单簿: bid={:.2}, ask={:.2}, obi={:.3}",
-                           ob.best_bid, ob.best_ask,
-                           (ob.bids_volume - ob.asks_volume) / (ob.bids_volume + ob.asks_volume + 0.0001));
+                    info!("[心跳] BTC价格: bid={:.2}, ask={:.2} (档位: {} bids, {} asks)",
+                          ob.best_bid, ob.best_ask, internal.bids.len(), internal.asks.len());
                 }
             }
         });
@@ -227,55 +290,27 @@ impl BinanceWsClient {
         // 应用增量更新
         for bid in &update.bids {
             if bid.len() >= 2 {
-                let price = bid[0].clone();
+                let price: f64 = bid[0].parse().unwrap_or(0.0);
                 let qty: f64 = bid[1].parse().unwrap_or(0.0);
-                if qty == 0.0 {
-                    internal_guard.bids.remove(&price);
-                } else {
-                    internal_guard.bids.insert(price, qty);
-                }
+                internal_guard.update_bid(price, qty);
             }
         }
 
         for ask in &update.asks {
             if ask.len() >= 2 {
-                let price = ask[0].clone();
+                let price: f64 = ask[0].parse().unwrap_or(0.0);
                 let qty: f64 = ask[1].parse().unwrap_or(0.0);
-                if qty == 0.0 {
-                    internal_guard.asks.remove(&price);
-                } else {
-                    internal_guard.asks.insert(price, qty);
-                }
+                internal_guard.update_ask(price, qty);
             }
         }
 
         internal_guard.last_update_id = update.final_update_id;
 
-        // 计算前5档汇总
-        let mut bids_vol = 0.0;
-        let mut asks_vol = 0.0;
-        let mut best_bid = 0.0;
-        let mut best_ask = f64::MAX;
-
-        // BTreeMap是升序，bids需要降序（取最后5个）
-        for (price_str, qty) in internal_guard.bids.iter().rev().take(5) {
-            if let Ok(price) = price_str.parse::<f64>() {
-                bids_vol += qty;
-                if price > best_bid {
-                    best_bid = price;
-                }
-            }
-        }
-
-        // asks是升序（取前5个）
-        for (price_str, qty) in internal_guard.asks.iter().take(5) {
-            if let Ok(price) = price_str.parse::<f64>() {
-                asks_vol += qty;
-                if price < best_ask {
-                    best_ask = price;
-                }
-            }
-        }
+        // 获取最佳价格和前5档总量
+        let best_bid = internal_guard.best_bid().unwrap_or(0.0);
+        let best_ask = internal_guard.best_ask().unwrap_or(f64::MAX);
+        let bids_vol = internal_guard.top_bids_volume(5);
+        let asks_vol = internal_guard.top_asks_volume(5);
 
         // 更新公开订单簿
         let mut ob = orderbook.write().await;
@@ -284,6 +319,6 @@ impl BinanceWsClient {
         ob.bids_volume = bids_vol;
         ob.asks_volume = asks_vol;
         ob.last_update_time = update.event_time;
-        ob.is_valid = best_bid > 0.0 && best_ask < f64::MAX;
+        ob.is_valid = best_bid > 0.0 && best_ask < f64::MAX && best_ask > best_bid;
     }
 }
