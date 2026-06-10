@@ -10,6 +10,7 @@ mod dry_run;
 mod report;
 mod risk;
 mod signal;
+mod telegram;
 mod trader;
 
 use binance_ws::BinanceWsClient;
