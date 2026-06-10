@@ -116,12 +116,17 @@ impl DryRunTrader {
             interval.tick().await;
 
             // 获取当前价格 - 提取数据后立即释放锁
-            let (current_price, obi) = {
+            let (current_price, obi, is_valid) = {
                 let ob = self.orderbook.read().await;
                 let price = (ob.best_bid + ob.best_ask) / 2.0;
                 let obi_val = SignalEngine::calculate_obi(ob.bids_volume, ob.asks_volume);
-                (price, obi_val)
+                (price, obi_val, ob.is_valid)
             }; // ob在这里被释放
+
+            // 如果价格数据无效，跳过本轮
+            if !is_valid {
+                continue;
+            }
 
             // 1. 如果有持仓，检查止损止盈
             let should_close = self.check_position_close(current_price);

@@ -47,6 +47,7 @@ pub struct OrderBook {
     pub asks_volume: f64,
     pub last_update_time: i64,
     pub is_valid: bool,
+    pub reference_price: f64,  // 参考价格，用于检测异常
 }
 
 impl Default for OrderBook {
@@ -58,6 +59,7 @@ impl Default for OrderBook {
             asks_volume: 0.0,
             last_update_time: 0,
             is_valid: false,
+            reference_price: 0.0,
         }
     }
 }
@@ -314,11 +316,42 @@ impl BinanceWsClient {
 
         // 更新公开订单簿
         let mut ob = orderbook.write().await;
-        ob.best_bid = best_bid;
-        ob.best_ask = best_ask;
-        ob.bids_volume = bids_vol;
-        ob.asks_volume = asks_vol;
-        ob.last_update_time = update.event_time;
-        ob.is_valid = best_bid > 0.0 && best_ask < f64::MAX && best_ask > best_bid;
+
+        // 价格合理性检查
+        let mid_price = (best_bid + best_ask) / 2.0;
+        let spread_pct = if best_bid > 0.0 { (best_ask - best_bid) / best_bid } else { 1.0 };
+
+        // 检查条件：
+        // 1. 基本有效性：bid > 0, ask < MAX, ask > bid
+        // 2. 价差合理：< 0.5%（异常数据通常价差巨大）
+        // 3. 如果有参考价格，新价格偏差 < 5%
+        let basic_valid = best_bid > 0.0 && best_ask < f64::MAX && best_ask > best_bid;
+        let spread_valid = spread_pct < 0.005;  // 0.5%
+        let reference_valid = if ob.reference_price > 0.0 {
+            let deviation = (mid_price - ob.reference_price).abs() / ob.reference_price;
+            deviation < 0.05  // 5%
+        } else {
+            true
+        };
+
+        if basic_valid && spread_valid && reference_valid {
+            ob.best_bid = best_bid;
+            ob.best_ask = best_ask;
+            ob.bids_volume = bids_vol;
+            ob.asks_volume = asks_vol;
+            ob.last_update_time = update.event_time;
+            ob.is_valid = true;
+            // 更新参考价格（缓慢移动平均）
+            if ob.reference_price > 0.0 {
+                ob.reference_price = ob.reference_price * 0.99 + mid_price * 0.01;
+            } else {
+                ob.reference_price = mid_price;
+            }
+        } else {
+            // 价格异常，标记无效
+            ob.is_valid = false;
+            warn!("[Binance] 价格异常: bid={:.2}, ask={:.2}, spread={:.3}%, ref={:.2}",
+                  best_bid, best_ask, spread_pct * 100.0, ob.reference_price);
+        }
     }
 }
