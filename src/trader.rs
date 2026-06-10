@@ -5,7 +5,8 @@
 use crate::binance_rest::BinanceRestClient;
 use crate::binance_ws::OrderBook;
 use crate::config::Config;
-use crate::database::{Database, TradeRecord};
+use crate::database::Database;
+use crate::report::TradeRecord;
 use crate::risk::RiskManager;
 use crate::signal::{SignalEngine, TradeSignal};
 use std::sync::Arc;

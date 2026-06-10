@@ -124,31 +124,7 @@ impl DryRunTrader {
             }; // ob在这里被释放
 
             // 1. 如果有持仓，检查止损止盈
-            let should_close = {
-                if let Some(ref mut pos) = self.position {
-                    // 更新最高/最低价
-                    if current_price > pos.highest_price {
-                        pos.highest_price = current_price;
-                    }
-                    if current_price < pos.lowest_price {
-                        pos.lowest_price = current_price;
-                    }
-
-                    // 计算盈亏
-                    let pnl_pct = match pos.side.as_str() {
-                        "LONG" => (current_price - pos.entry_price) / pos.entry_price,
-                        "SHORT" => (pos.entry_price - current_price) / pos.entry_price,
-                        _ => 0.0,
-                    };
-
-                    let hold_time = chrono::Utc::now().timestamp() - pos.entry_time;
-
-                    // 检查平仓条件
-                    self.check_close_conditions(pnl_pct, hold_time, current_price, pos)
-                } else {
-                    None
-                }
-            };
+            let should_close = self.check_position_close(current_price);
 
             if let Some(reason) = should_close {
                 self.close_position(current_price, reason).await;
@@ -174,6 +150,30 @@ impl DryRunTrader {
                 last_print = std::time::Instant::now();
             }
         }
+    }
+
+    /// 检查持仓是否需要平仓
+    fn check_position_close(&mut self, current_price: f64) -> Option<String> {
+        let pos = self.position.as_mut()?;
+
+        // 更新最高/最低价
+        if current_price > pos.highest_price {
+            pos.highest_price = current_price;
+        }
+        if current_price < pos.lowest_price {
+            pos.lowest_price = current_price;
+        }
+
+        // 计算盈亏
+        let pnl_pct = match pos.side.as_str() {
+            "LONG" => (current_price - pos.entry_price) / pos.entry_price,
+            "SHORT" => (pos.entry_price - current_price) / pos.entry_price,
+            _ => 0.0,
+        };
+
+        let hold_time = chrono::Utc::now().timestamp() - pos.entry_time;
+
+        self.check_close_conditions(pnl_pct, hold_time, current_price, pos)
     }
 
     /// 检查平仓条件
