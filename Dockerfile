@@ -33,4 +33,8 @@ ENV DRY_RUN=true
 ENV INITIAL_BALANCE=1000.0
 ENV TELEGRAM_ENABLED=true
 
+# 健康检查：每60秒检查一次，如果5分钟无更新则标记不健康
+HEALTHCHECK --interval=60s --timeout=5s --start-period=30s --retries=5 \
+    CMD test -f /app/data/.heartbeat && test $(($(date +%s) - $(cat /app/data/.heartbeat))) -lt 300 || exit 1
+
 CMD ["./btc-futures-sniper"]

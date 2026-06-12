@@ -109,6 +109,8 @@ impl DryRunTrader {
         self.is_running = true;
         let mut interval = tokio::time::interval(tokio::time::Duration::from_millis(500));
         let mut last_print = std::time::Instant::now();
+        let mut last_valid_time = std::time::Instant::now();
+        let mut invalid_count = 0u32;
 
         info!("🚀 开始监控市场...");
 
@@ -123,10 +125,27 @@ impl DryRunTrader {
                 (price, obi_val, ob.is_valid)
             }; // ob在这里被释放
 
-            // 如果价格数据无效，跳过本轮
+            // 如果价格数据无效，检查看门狗
             if !is_valid {
+                invalid_count += 1;
+
+                // 每100次无效打印一次警告
+                if invalid_count % 100 == 0 {
+                    warn!("⚠️  价格数据无效 (连续 {} 次)", invalid_count);
+                }
+
+                // 看门狗：连续5分钟无效数据则退出（让 Zeabur 重启容器）
+                if last_valid_time.elapsed().as_secs() > 300 {
+                    warn!("🚨 看门狗触发：连续5分钟无有效数据，退出进程");
+                    std::process::exit(1);
+                }
+
                 continue;
             }
+
+            // 重置看门狗
+            last_valid_time = std::time::Instant::now();
+            invalid_count = 0;
 
             // 1. 如果有持仓，检查止损止盈
             let should_close = self.check_position_close(current_price);

@@ -225,7 +225,7 @@ impl BinanceWsClient {
         let orderbook = self.orderbook.clone();
         let internal = self.internal.clone();
 
-        // 心跳任务
+        // 心跳任务（同时写入心跳文件）
         let heartbeat_orderbook = orderbook.clone();
         let heartbeat_internal = internal.clone();
         tokio::spawn(async move {
@@ -241,11 +241,16 @@ impl BinanceWsClient {
                 if ob.is_valid {
                     info!("[心跳] BTC价格: bid={:.2}, ask={:.2} (档位: {} bids, {} asks)",
                           ob.best_bid, ob.best_ask, internal.bids.len(), internal.asks.len());
+
+                    // 写入心跳文件（用于 Docker 健康检查）
+                    let _ = std::fs::write("/app/data/.heartbeat", chrono::Utc::now().timestamp().to_string());
+                } else {
+                    warn!("[心跳] 价格数据无效!");
                 }
             }
         });
 
-        // 消息处理
+        // 消息处理（断开时标记无效）
         tokio::spawn(async move {
             while let Some(msg) = read.next().await {
                 match msg {
@@ -262,6 +267,10 @@ impl BinanceWsClient {
                     }
                     Err(e) => {
                         error!("[Binance WS] 错误: {}", e);
+                        // 标记数据无效，触发看门狗退出
+                        let mut ob = orderbook.write().await;
+                        ob.is_valid = false;
+                        ob.last_update_time = 0;
                         break;
                     }
                     _ => {}
