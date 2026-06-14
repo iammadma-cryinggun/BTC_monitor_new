@@ -3,8 +3,7 @@
 // ─────────────────────────────────────────────────────────────
 
 use reqwest::Client;
-use serde::{Deserialize, Serialize};
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, warn};
 
 /// Telegram 配置
 #[derive(Debug, Clone)]
