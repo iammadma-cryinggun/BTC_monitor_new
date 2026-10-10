@@ -119,8 +119,35 @@ def fetch_klines(sym, interval, limit, market="spot"):
     raise last_err
 
 def get_universe(market="spot"):
-    """All TRADING USDT pairs on Binance (spot or futures perpetuals)."""
-    import urllib.request
+    """All TRADING USDT pairs on Binance (spot or futures perpetuals).
+
+    Results are cached to data/scan_<market>/universe_cache.json (24h TTL).
+    On fetch failure we reuse a fresh cache if present, otherwise fall back to
+    the curated FUTURES_UNIVERSE / UNIVERSE AND emit a clear warning (no silent
+    shrink to the small list).
+    """
+    import urllib.request, time as _time
+    cache_dir = os.path.join(DATA, f"scan_{market}")
+    cache_path = os.path.join(cache_dir, "universe_cache.json")
+    ttl = 24 * 3600
+    def _read_cache():
+        try:
+            if os.path.exists(cache_path):
+                with open(cache_path, "r", encoding="utf-8") as f:
+                    c = json.load(f)
+                if _time.time() - c.get("ts", 0) < ttl and c.get("symbols"):
+                    return c["symbols"]
+        except Exception:
+            pass
+        return None
+    def _write_cache(syms):
+        try:
+            os.makedirs(cache_dir, exist_ok=True)
+            with open(cache_path, "w", encoding="utf-8") as f:
+                json.dump({"ts": int(_time.time()), "symbols": syms}, f)
+        except Exception:
+            pass
+
     if market == "futures":
         hosts = ["https://fapi.binance.com/fapi/v1/exchangeInfo",
                  "https://fapi1.binance.com/fapi/v1/exchangeInfo",
@@ -131,6 +158,8 @@ def get_universe(market="spot"):
                  "https://api1.binance.com/api/v3/exchangeInfo",
                  "https://data-api.binance.vision/api/v3/exchangeInfo"]
         skip = {"USDC","USDT","DAI","TUSD","FDUSD","EUR","BUSD","PYUSD","USDP","BTC","ETH","BNB"}
+
+    fetched = None
     for host in hosts:
         try:
             req = urllib.request.Request(host, headers=UA)
@@ -152,10 +181,26 @@ def get_universe(market="spot"):
                         if b.endswith(("UP","DOWN","BULL","BEAR")):
                             continue
                         syms.append(s["symbol"])
-            return sorted(set(syms))
+            fetched = sorted(set(syms))
+            break
         except Exception:
             continue
-    return (FUTURES_UNIVERSE if market == "futures" else UNIVERSE)
+
+    if fetched:
+        _write_cache(fetched)
+        return fetched
+
+    # fetch failed — try cache, then warn loudly instead of silently shrinking
+    cached = _read_cache()
+    if cached:
+        print(f"[universe] WARNING: live exchangeInfo fetch failed; reusing cached "
+              f"universe ({len(cached)} symbols, up to 24h old)")
+        return cached
+    fallback = FUTURES_UNIVERSE if market == "futures" else UNIVERSE
+    print(f"[universe] WARNING: exchangeInfo fetch FAILED and no cache; "
+          f"falling back to curated list ({len(fallback)} symbols). "
+          f"Set MONITOR_UNIVERSE=curated to acknowledge, or fix network/region.")
+    return fallback
 
 def load_or_fetch(sym, interval, limit, market="spot", force_fetch=False):
     scan_dir = os.path.join(DATA, f"scan_{market}")

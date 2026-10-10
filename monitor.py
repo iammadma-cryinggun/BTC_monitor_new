@@ -171,12 +171,21 @@ class Monitor:
     def _build_universe(self):
         u = self.cfg.get("universe", "curated")
         if u == "list":
+            self.universe_source = "list(config)"
             return [s.strip().upper() for s in self.cfg.get("symbols", []) if s.strip()]
         if u == "exchange":
             print("[universe] fetching all Binance futures perps ...")
             sym = get_universe(market=self.market)
-            print(f"[universe] {len(sym)} perps")
+            # distinguish live vs cached vs fallback so the dashboard is transparent
+            path = os.path.join(DATA, "scan_%s" % self.market, "universe_cache.json")
+            live = os.path.exists(path) and (time.time() - os.path.getmtime(path) < 60)
+            if len(sym) <= len(FUTURES_UNIVERSE) + 5:
+                self.universe_source = "curated(fallback)" if len(sym) <= len(FUTURES_UNIVERSE) else "exchange(cached)"
+            else:
+                self.universe_source = "exchange(live)" if live else "exchange(cached)"
+            print(f"[universe] {len(sym)} perps  source={self.universe_source}")
             return sym
+        self.universe_source = "curated"
         return list(FUTURES_UNIVERSE)
 
     # ---- state ----
@@ -220,6 +229,8 @@ class Monitor:
                 "last_scan": self.last_scan_iso,
                 "next_scan_epoch": self.next_scan_epoch(),
                 "market": self.market,
+                "universe_source": getattr(self, "universe_source", "curated"),
+                "universe_size": len(self.universe),
                 "scan_interval_minutes": self.scan_interval,
                 "scan_summary": getattr(self, "scan_summary", {}),
             }
@@ -316,7 +327,8 @@ class Monitor:
         date = self.utc_to_local(time.time()).strftime("%Y-%m-%d")
 
         lines = [f"📅 每日妖币埋伏监控 · {date}", ""]
-        lines.append(f"扫描 {len(ranked)} 个合约妖币 | 埋伏候选 {len(coiling)} | 刚启动 {len(fresh)}")
+        src = getattr(self, "universe_source", "curated")
+        lines.append(f"监控池 {src} · 池大小 {len(self.universe)} · 本轮有效 {len(ranked)} 币 | 埋伏候选 {len(coiling)} | 刚启动 {len(fresh)}")
         lines.append("")
         lines.append("🔥 埋伏观察列表（横盘蓄力，等第一根巨量启动）:")
         if coiling:

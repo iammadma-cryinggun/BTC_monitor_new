@@ -129,13 +129,16 @@ def build_dashboard_html(ranked, signals, meta=None):
         diag = (f'<div class="note" style="color:{color}">'
                 f'扫描诊断：尝试 {attempted} · 成功 {ok} · 跳过 {skipped}'
                 + (f'（{rtxt}）' if rtxt else '')
-                + ' ｜ 跳过过多多为 symbol 不在合约/被限流，可设环境变量 MONITOR_UNIVERSE=exchange</div>')
+                + ' ｜ 跳过多为 symbol 已被下架/不在该市场，或瞬时被限流（下一轮缓存命中即可恢复）</div>')
 
     watch = [r for r in ranked if r.get("label") in ("COILING", "FRESH_LAUNCH")]
     watch.sort(key=lambda r: -r.get("score", 0))
     others = [r for r in ranked if r.get("label") not in ("COILING", "FRESH_LAUNCH")]
     others.sort(key=lambda r: -r.get("score", 0))
-    ordered = watch + others
+    # cap the full table at 150 rows so a 400-coin universe stays readable
+    capped = len(others) > 150
+    others_disp = others[:150] if capped else others
+    ordered = watch + others_disp
 
     watch_rows = "".join(_row(r) for r in watch) or '<tr><td colspan="9" class="rs">（暂无埋伏候选）</td></tr>'
     full_rows = "".join(_row(r) for r in ordered) or '<tr><td colspan="9" class="rs">（无数据）</td></tr>'
@@ -154,6 +157,11 @@ def build_dashboard_html(ranked, signals, meta=None):
         sig_rows = '<tr><td colspan="4" class="smsg">（暂无信号）</td></tr>'
 
     next_epoch_js = int(next_epoch) if isinstance(next_epoch, (int, float)) else 0
+    u_src = meta.get("universe_source", "curated")
+    u_size = meta.get("universe_size", n_coins)
+    # highlight suspiciously small pools (silent fallback to curated)
+    u_color = "#f87171" if u_src.startswith("curated") and u_size <= 90 else "var(--mut)"
+    pool_line = f'监控池 <b style="color:{u_color}">{u_src}</b> · 池大小 {u_size} · 本轮有效 {n_coins}'
 
     html = f"""<!doctype html><html lang="zh"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -179,6 +187,7 @@ th{{color:var(--mut);font-weight:600;position:sticky;top:0;background:var(--card
 </style></head><body>
 <h1>🐸 妖币埋伏监控 · 实时看板</h1>
 <div class="sub">生成 {gen} ｜ 数据源 Binance USD-M 合约 ｜ 4h 六阶段 + 1h MA99 ｜ 时区 UTC ｜ 每 {interval} 分钟扫描一次（本页每 60 秒自动刷新）</div>
+<div class="note" style="margin-bottom:12px">{pool_line}</div>
 
 <div class="card">
   <div class="kpis">
@@ -199,10 +208,11 @@ th{{color:var(--mut);font-weight:600;position:sticky;top:0;background:var(--card
 </div>
 
 <div class="card">
-  <div class="h2">📊 全量监控（按埋伏分排序）</div>
+  <div class="h2">📊 全量监控（按埋伏分排序，显示前 {len(ordered)} / 共 {n_coins}）</div>
   <table><tr><th>币种</th><th>标签</th><th>阶段</th><th>分</th><th>现价</th><th>vsMA99</th><th>~1日</th><th>4h走势</th><th>依据</th></tr>
   {full_rows}
   </table>
+  {('<div class="note">已按埋伏分截断显示前 150 行；全部 {0} 个币均已扫描，完整数据见 <code>data/monitor_state.json</code>。</div>'.format(len(others))) if capped else ''}
 </div>
 
 <div class="card">
