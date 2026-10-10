@@ -31,6 +31,16 @@
 > 拿 chat_id：给 @userinfobot 发任意消息即可；bot_token 来自 @BotFather。
 >
 > 也可以**不写 config 文件**，直接用环境变量注入（优先级高于 `monitor_config.json`）：`TELEGRAM_BOT_TOKEN`、`TELEGRAM_CHAT_ID`、`WEBHOOK_URL`。适合 Zeabur / CI 等不提交密钥的场景。`monitor_config.json` 已被 `.gitignore` 忽略，仓库内置的是 `monitor_config.example.json` 占位模板，克隆后需自行补一份或设环境变量。
+>
+> **更多可调环境变量**（Zeabur 后台直接改，无需改代码）：
+> - `MONITOR_UNIVERSE`：`curated`（默认，~80 精选妖币）｜ `exchange`（动态拉全部真实永续，自动剔除下架币、覆盖新上币，推荐用这个让监控池始终有效）｜ `list`（配合 `monitor_config.json` 的 `symbols`）
+> - `MONITOR_MARKET`：`futures`（默认，妖币主战场）｜ `spot`
+> - `SCAN_INTERVAL_MINUTES`：扫描间隔，默认 120
+> - `DIGEST_HOUR`：每日摘要的本地时刻（小时），默认 8
+> - `LOCAL_UTC_OFFSET`：本地时区相对 UTC 偏移，默认 8（北京时间）
+> - `REQUEST_SLEEP`：每币请求间隔（秒），默认 0.15，调大可进一步降权防封
+>
+> **若看板上「监控币数」远小于预期**（例如只有 3/80），多半是 curated 列表里大量 symbol 在合约上已不存在（404）或被限流。把 `MONITOR_UNIVERSE` 设成 `exchange` 即可让监控池回到全量真实永续。看板顶部「扫描诊断」一行会显示尝试/成功/跳过(及原因)，用于定位。
 
 ### 本地试运行
 
@@ -56,9 +66,13 @@ python monitor.py --web --port 8080
 3. **Builder** 选 Dockerfile（已就绪）。
 4. **Region**：选 Binance 友好区（Singapore / Tokyo）降低延迟与风控。
 5. **Port**：Zeabur 会自动分配并注入 `PORT` 环境变量，Dockerfile 已用 `--port ${PORT:-8080}` 接管，无需手动填。
-6. 在 Service 的 **Environment Variables** 里设好：
+6. 在 Service 的 **Environment Variables / Secrets** 里设好（密钥项勾选 Secret）：
+   - `TELEGRAM_BOT_TOKEN`（Secret）— 否则收不到 Telegram 警报
+   - `TELEGRAM_CHAT_ID`（Secret）
+   - `MONITOR_UNIVERSE` = `exchange` — **推荐**，动态拉全部真实永续，监控池始终有效（默认 `curated` 写死 ~80 个 symbol，很多已下架会显示「跳过」）
    - `PORT`（Zeabur 自动给，可留空让其注入）
-   - 不需任何密钥即可运行；Telegram 凭据写在你的 `monitor_config.json`（已 gitignore 敏感项，或用 Zeabur 环境变量覆盖）。
+   - 其余调优变量可选：`MONITOR_MARKET` / `SCAN_INTERVAL_MINUTES` / `DIGEST_HOUR` / `LOCAL_UTC_OFFSET` / `REQUEST_SLEEP`（见上方说明）
+   - 不需任何密钥也能跑（回退到 `log` 通道）；但 Telegram 凭据建议用 Secrets 注入。
 7. **Volume**：挂一个持久卷到 `/app/data`，否则重启后监控状态/信号历史会丢失。
 8. **敏感项**：`monitor_config.json` 含 Telegram token，建议用 Zeabur 的 Environment Variables / Secrets 注入，或私有仓库 + 不公开 config。
 9. Deploy。部署后 Zeabur 给一个公开 URL → 就是你的网页看板；Telegram 同时推送信号。

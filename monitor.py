@@ -131,6 +131,22 @@ def classify(sym, rec, prev):
 # ----------------------------------------------------------------------------
 class Monitor:
     def __init__(self, cfg, notifier):
+        cfg = dict(cfg)
+        # env-var overrides so Zeabur can tune without editing the committed config
+        env = os.environ
+        if env.get("MONITOR_UNIVERSE"):
+            cfg["universe"] = env["MONITOR_UNIVERSE"].strip().lower()
+        if env.get("MONITOR_MARKET"):
+            cfg["market"] = env["MONITOR_MARKET"].strip().lower()
+        for _k, _ev in (("scan_interval_minutes", "SCAN_INTERVAL_MINUTES"),
+                        ("digest_hour", "DIGEST_HOUR"),
+                        ("local_utc_offset_hours", "LOCAL_UTC_OFFSET"),
+                        ("request_sleep", "REQUEST_SLEEP")):
+            if env.get(_ev):
+                try:
+                    cfg[_k] = float(env[_ev]) if _k == "request_sleep" else int(env[_ev])
+                except ValueError:
+                    pass
         self.cfg = cfg
         self.notifier = notifier
         self.market = cfg["market"]
@@ -147,6 +163,7 @@ class Monitor:
         self.universe = self._build_universe()
         self.state = {}
         self.last_ranked = []
+        self.scan_summary = {}
         self.last_scan_iso = now_iso()
         self.stop = False
         self.first_run = True
@@ -204,6 +221,7 @@ class Monitor:
                 "next_scan_epoch": self.next_scan_epoch(),
                 "market": self.market,
                 "scan_interval_minutes": self.scan_interval,
+                "scan_summary": getattr(self, "scan_summary", {}),
             }
             write_dashboard(self.last_ranked or [], signals, meta)
         except Exception as e:
@@ -217,6 +235,7 @@ class Monitor:
         new_signals = []
         t0 = time.time()
         n_ok = 0
+        skip_reasons = {}
         offline = os.environ.get("MONITOR_OFFLINE") == "1"
         for sym in self.universe:
             try:
@@ -232,7 +251,15 @@ class Monitor:
                 except Exception as e:
                     rec, err = None, f"exc: {e}"
             if rec is None:
-                print(f"  skip {sym}: {err}")
+                e = (err or "").lower()
+                if "404" in e or "http error" in e:
+                    reason = "not_on_exchange"
+                elif "timeout" in e or "url" in e or "connection" in e or "remote" in e or "fetch fail" in e:
+                    reason = "network"
+                else:
+                    reason = "other"
+                skip_reasons[reason] = skip_reasons.get(reason, 0) + 1
+                print(f"  skip {sym}: {err}  [{reason}]")
                 continue
             n_ok += 1
             ranked.append(rec)
@@ -253,6 +280,19 @@ class Monitor:
         self.save_state(state_out)
         self.last_ranked = ranked
         self.last_scan_iso = now_iso()
+        self.scan_summary = {
+            "attempted": len(self.universe),
+            "ok": n_ok,
+            "skipped": len(self.universe) - n_ok,
+            "skip_reasons": skip_reasons,
+            "elapsed_s": round(time.time() - t0),
+            "ts": self.last_scan_iso,
+        }
+        try:
+            with open(os.path.join(os.path.dirname(STATE_PATH), "scan_summary.json"), "w", encoding="utf-8") as f:
+                json.dump(self.scan_summary, f, indent=2, default=str)
+        except Exception:
+            pass
         dt = time.time() - t0
         print(f"[scan] done: {n_ok}/{len(self.universe)} ok, {dt:.0f}s, {len(new_signals)} new signals")
         if self.first_run:

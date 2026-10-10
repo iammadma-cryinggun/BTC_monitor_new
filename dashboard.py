@@ -117,6 +117,20 @@ def build_dashboard_html(ranked, signals, meta=None):
     except Exception:
         n_sig24 = len(signals)
 
+    ss = meta.get("scan_summary") or {}
+    diag = ""
+    if ss:
+        attempted = ss.get("attempted", 0)
+        ok = ss.get("ok", 0)
+        skipped = ss.get("skipped", 0)
+        reasons = ss.get("skip_reasons", {})
+        rtxt = "  ".join(f"{k}:{v}" for k, v in reasons.items())
+        color = "#f87171" if skipped > ok else "#9ca3af"
+        diag = (f'<div class="note" style="color:{color}">'
+                f'扫描诊断：尝试 {attempted} · 成功 {ok} · 跳过 {skipped}'
+                + (f'（{rtxt}）' if rtxt else '')
+                + ' ｜ 跳过过多多为 symbol 不在合约/被限流，可设环境变量 MONITOR_UNIVERSE=exchange</div>')
+
     watch = [r for r in ranked if r.get("label") in ("COILING", "FRESH_LAUNCH")]
     watch.sort(key=lambda r: -r.get("score", 0))
     others = [r for r in ranked if r.get("label") not in ("COILING", "FRESH_LAUNCH")]
@@ -175,6 +189,7 @@ th{{color:var(--mut);font-weight:600;position:sticky;top:0;background:var(--card
     <div class="kpi">近24h信号 <b>{n_sig24}</b></div>
   </div>
   <div class="note">上次扫描：{last_scan} ｜ 距下次扫描：<span id="cd" class="cnt">—</span> ｜ 手动交易，纪律第一，本看板只呈现信号、不代下单。</div>
+  {diag}
 </div>
 
 <div class="card">
