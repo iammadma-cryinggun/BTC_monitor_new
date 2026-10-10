@@ -157,7 +157,6 @@ def build_dashboard_html(ranked, signals, meta=None):
 
     html = f"""<!doctype html><html lang="zh"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<meta http-equiv="refresh" content="60">
 <title>妖币埋伏监控 · 实时看板</title>
 <style>
 :root{{--bg:#0f1115;--card:#161a22;--bd:#1f2937;--tx:#e5e7eb;--mut:#9ca3af}}
@@ -224,6 +223,11 @@ function tick(){{
   document.getElementById('cd').textContent = m+' 分 '+s+' 秒';
 }}
 tick(); setInterval(tick, 1000);
+// auto-reload every 60s with a cache-buster query so the browser/CDN never serves a stale copy
+setTimeout(function(){{
+  var sep = location.search ? "&" : "?";
+  location.href = location.pathname + sep + "_=" + Date.now();
+}}, 60000);
 </script>
 </body></html>"""
     return html
@@ -256,6 +260,8 @@ class DashboardServer:
             def __init__(self, *a, **k):
                 super().__init__(*a, directory=data_dir, **k)
             def do_GET(self):
+                # strip query string (cache-busters like /?_=123) before matching
+                self.path = self.path.split("?", 1)[0]
                 if self.path in ("/", "/index.html", "/dashboard", "/dashboard.html"):
                     self.path = "/dashboard.html"
                 elif self.path == "/state.json":
@@ -263,6 +269,13 @@ class DashboardServer:
                 elif self.path == "/signals.json":
                     self.path = "/signals_log.json"
                 return super().do_GET()
+            def end_headers(self):
+                # NEVER cache the dashboard — Zeabur edge / browser would otherwise
+                # serve a stale copy and the page would never reflect new scans.
+                self.send_header("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
+                self.send_header("Pragma", "no-cache")
+                self.send_header("Expires", "0")
+                super().end_headers()
             def log_message(self, *a):
                 pass
         return _H
