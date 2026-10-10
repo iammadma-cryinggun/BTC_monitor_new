@@ -1,0 +1,433 @@
+"""
+24h Memecoin 埋伏监控器 —— 部署到 Zeabur 云端长期运行。
+
+它做什么（你手动交易，它只报警）:
+  - 周期性扫描 Binance USD-M 合约妖币池（默认 FUTURES_UNIVERSE，约 80 个）
+  - 用六阶段剧本检测器 (memecoin_playbook_scanner.detect) 判定每个币当前阶段
+  - 跨扫描维护 state.json，只在「阶段/事件发生转移」时推送信号:
+        🚀 ENTER   新启动 (S2 第一根巨量突破)  -> 进观察列表做 S3->S4
+        💧 DIP     S3 洗盘 -> 可低吸
+        🔥 AMBUSH  横盘蓄力 + 量能抬头 -> 加入埋伏观察，等启动
+        ⚠️ TOP     4h 插针见顶 -> 至少减一半
+        🩸 CRASH   崩盘 -> 别接刀
+        ↩️ BOUNCE  崩后巨量反弹 -> 阶段6不是底，别追
+  - 每天本地 digest_hour 点推送「当日埋伏观察列表」(哪些币值得盯)
+
+防封策略:
+  - 只访问公开行情 klines（无需 API key，权重极低）
+  - 每个币之间 sleep（默认 0.15s），整轮约 30~90s，远低于 Binance 限制
+  - 多 host 轮换 + 失败指数退避（memecoin_scanner.fetch_klines 已实现）
+  - 不读账户、不下单，纯只读
+
+部署: 见 README.md（Zeabur Service + Dockerfile，区域选 Binance 友好区如 SG/JP）。
+
+用法:
+  python monitor.py                 # 长期运行（Zeabur 上用这个）
+  python monitor.py --once         # 单次扫描+推送（测试用）
+  python monitor.py --test-notify  # 仅测试通知渠道是否连通
+"""
+import os, sys, json, time, argparse, signal
+from datetime import datetime, timezone, timedelta
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, HERE)
+from memecoin_scanner import score_coin, FUTURES_UNIVERSE, get_universe  # reuse detection
+from notifier import Notifier
+import dashboard
+from dashboard import DashboardServer, append_signal, load_signals, write_dashboard
+
+STATE_PATH = os.path.join(HERE, "data", "monitor_state.json")
+DIGEST_PATH = os.path.join(HERE, "data", "daily_digest.html")
+
+SIG_EMOJI = {"ENTER": "🚀", "DIP": "💧", "AMBUSH": "🔥", "TOP": "⚠️", "CRASH": "🩸", "BOUNCE": "↩️"}
+SIG_ORDER = ["ENTER", "AMBUSH", "DIP", "TOP", "CRASH", "BOUNCE"]
+
+DEFAULT_CONFIG = {
+    "market": "futures",
+    "universe": "curated",          # "curated" | "exchange" | "list"
+    "symbols": [],                  # used when universe=="list"
+    "scan_interval_minutes": 120,   # 信号扫描间隔
+    "digest_hour": 8,               # 本地时区的每日摘要时刻（小时）
+    "local_utc_offset_hours": 8,    # 本地时区相对 UTC 的偏移（北京时间=8）
+    "request_sleep": 0.15,          # 每币之间的 sleep，防封
+    "web": {"enabled": True, "host": "0.0.0.0", "port": 8080},  # live dashboard
+    "notification": {"channel": "log"},
+}
+
+
+# ----------------------------------------------------------------------------
+def load_config(path):
+    cfg = dict(DEFAULT_CONFIG)
+    if path and os.path.exists(path):
+        with open(path, "r", encoding="utf-8") as f:
+            user = json.load(f)
+        cfg.update(user)
+        # deep-merge notification
+        if "notification" in user:
+            cfg["notification"] = {**DEFAULT_CONFIG["notification"], **user["notification"]}
+    else:
+        # fresh clone has no local monitor_config.json (it's gitignored) -> fall back to example
+        example = os.path.join(HERE, "monitor_config.example.json")
+        if os.path.exists(example):
+            with open(example, "r", encoding="utf-8") as f:
+                user = json.load(f)
+            cfg.update(user)
+            if "notification" in user:
+                cfg["notification"] = {**DEFAULT_CONFIG["notification"], **user["notification"]}
+            print(f"[config] '{path}' not found, using example config "
+                  f"(set TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID env vars for notifications)")
+    return cfg
+
+
+def now_iso():
+    return datetime.now(timezone.utc).isoformat()
+
+
+def event_sig(e):
+    return f"{e.get('type')}@{e.get('ts')}"
+
+
+def classify(sym, rec, prev):
+    """Return (signals, current_event_sigs). signals = list of (level, msg, ev)."""
+    cur_sigs = set(event_sig(e) for e in rec.get("events", []))
+    prev_sigs = set(prev.get("event_sigs", [])) if prev else set()
+    signals = []
+    for e in rec.get("events", []):
+        if event_sig(e) in prev_sigs:
+            continue
+        t = e["type"]
+        note = e.get("note", "")
+        if t == "LAUNCH":
+            signals.append(("ENTER",
+                f"{sym} 新启动 (S2)：横盘后第一根巨量突破（{note}）。\n"
+                f"按剧本进观察列表，等待 S3 洗盘后做 S3→S4 主升。", e))
+        elif t == "SHAKEOUT":
+            signals.append(("DIP",
+                f"{sym} 进入 S3 洗盘（{note}）。\n"
+                f"这是剧本里的低吸区，用 4h 移动止损，别用固定止损。", e))
+        elif t == "WICKTOP":
+            signals.append(("TOP",
+                f"{sym} 4h 出现长上影插针（{note}）。\n"
+                f"至少减一半仓位，跌破 MA99 全撤。", e))
+        elif t == "CRASH":
+            signals.append(("CRASH",
+                f"{sym} 崩盘（{note}）。别接刀，等重新横盘。", e))
+        elif t == "DEATHBOUNCE":
+            signals.append(("BOUNCE",
+                f"{sym} 崩后巨量反弹（{note}）。这是阶段6，不是底，别追。", e))
+    # 埋伏★：COILING + 量能刚抬头（且之前不是这个状态）
+    ambush_now = (rec["label"] == "COILING" and rec.get("vol_tick"))
+    ambush_prev = bool(prev and prev.get("label") == "COILING" and prev.get("vol_tick"))
+    if ambush_now and not ambush_prev:
+        pv = rec.get("pv")
+        pv_s = f"{pv*100:+.0f}%" if pv is not None else "n/a"
+        signals.append(("AMBUSH",
+            f"{sym} 埋伏★：横盘蓄力中量能抬头。\n"
+            f"横盘 {rec.get('flat_run')} 根 4h，区间 {rec.get('range_w',0)*100:.1f}% 宽，"
+            f"价 vs 4h MA99 = {pv_s}。\n加入观察列表，等第一根巨量突破再动手。", None))
+    return signals, cur_sigs
+
+
+# ----------------------------------------------------------------------------
+class Monitor:
+    def __init__(self, cfg, notifier):
+        self.cfg = cfg
+        self.notifier = notifier
+        self.market = cfg["market"]
+        self.scan_interval = cfg["scan_interval_minutes"]
+        self.digest_hour = cfg["digest_hour"]
+        self.local_offset = cfg["local_utc_offset_hours"]
+        self.request_sleep = cfg["request_sleep"]
+        # web dashboard
+        wc = cfg.get("web", {}) or {}
+        self.web_enabled = bool(wc.get("enabled", False))
+        self.web_host = wc.get("host", "0.0.0.0")
+        self.web_port = int(wc.get("port", 8080))
+        self.server = None
+        self.universe = self._build_universe()
+        self.state = {}
+        self.last_ranked = []
+        self.last_scan_iso = now_iso()
+        self.stop = False
+        self.first_run = True
+
+    def _build_universe(self):
+        u = self.cfg.get("universe", "curated")
+        if u == "list":
+            return [s.strip().upper() for s in self.cfg.get("symbols", []) if s.strip()]
+        if u == "exchange":
+            print("[universe] fetching all Binance futures perps ...")
+            sym = get_universe(market=self.market)
+            print(f"[universe] {len(sym)} perps")
+            return sym
+        return list(FUTURES_UNIVERSE)
+
+    # ---- state ----
+    def load_state(self):
+        if os.path.exists(STATE_PATH):
+            try:
+                with open(STATE_PATH, "r", encoding="utf-8") as f:
+                    return json.load(f)
+            except Exception:
+                pass
+        return {}
+
+    def save_state(self, state):
+        os.makedirs(os.path.dirname(STATE_PATH), exist_ok=True)
+        tmp = STATE_PATH + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(state, f, indent=2, default=str)
+        os.replace(tmp, STATE_PATH)
+
+    # ---- signals log (for web feed) ----
+    def log_signal(self, level, sym, msg, ev=None):
+        try:
+            append_signal(level, sym, msg, ev_type=ev)
+        except Exception:
+            pass
+
+    def next_scan_epoch(self, last_scan_ts=None):
+        try:
+            if last_scan_ts is None:
+                last_scan_ts = self.last_scan_iso
+            base = datetime.fromisoformat(last_scan_ts).timestamp()
+        except Exception:
+            base = time.time()
+        return int(base + self.scan_interval * 60)
+
+    # ---- web dashboard ----
+    def write_dashboard(self):
+        try:
+            signals = load_signals()
+            meta = {
+                "last_scan": self.last_scan_iso,
+                "next_scan_epoch": self.next_scan_epoch(),
+                "market": self.market,
+                "scan_interval_minutes": self.scan_interval,
+            }
+            write_dashboard(self.last_ranked or [], signals, meta)
+        except Exception as e:
+            print(f"[dashboard] write skipped: {e}")
+
+    # ---- scanning ----
+    def run_scan(self, emit=True):
+        state = self.load_state()
+        state_out = dict(state)
+        ranked = []
+        new_signals = []
+        t0 = time.time()
+        n_ok = 0
+        offline = os.environ.get("MONITOR_OFFLINE") == "1"
+        for sym in self.universe:
+            try:
+                rec, err = score_coin(sym, market=self.market, force_fetch=not offline)
+            except Exception as e:
+                rec, err = None, f"exc: {e}"
+            # resilience: if live fetch failed (or offline mode), fall back to cached klines
+            if rec is None and (offline or (err and err.startswith("fetch fail"))):
+                try:
+                    rec, err = score_coin(sym, market=self.market, force_fetch=False)
+                    if rec is not None:
+                        err = (err or "") + " (cached fallback)"
+                except Exception as e:
+                    rec, err = None, f"exc: {e}"
+            if rec is None:
+                print(f"  skip {sym}: {err}")
+                continue
+            n_ok += 1
+            ranked.append(rec)
+            prev = state.get(sym)
+            signals, cur_sigs = classify(sym, rec, prev)
+            state_out[sym] = {
+                "label": rec["label"], "stage": rec["stage"], "score": rec["score"],
+                "vol_tick": rec.get("vol_tick"), "price": rec["price"],
+                "pv": rec.get("pv"), "ma99_1h": rec.get("ma99_1h"),
+                "flat_run": rec.get("flat_run"), "range_w": rec.get("range_w"),
+                "event_sigs": list(cur_sigs), "updated": now_iso(),
+                "first_seen": (prev.get("first_seen") if prev else now_iso()),
+            }
+            if emit and prev is not None:   # skip signal emission on very first baseline
+                for lvl, msg, ev in signals:
+                    new_signals.append((lvl, sym, msg, ev))
+            time.sleep(self.request_sleep)
+        self.save_state(state_out)
+        self.last_ranked = ranked
+        self.last_scan_iso = now_iso()
+        dt = time.time() - t0
+        print(f"[scan] done: {n_ok}/{len(self.universe)} ok, {dt:.0f}s, {len(new_signals)} new signals")
+        if self.first_run:
+            self.first_run = False
+            if emit:
+                self.run_digest()  # give an initial overview on first baseline
+        if emit:
+            for lvl, sym, msg, ev in new_signals:
+                self.log_signal(lvl, sym, msg, ev=ev["type"] if isinstance(ev, dict) else None)
+                self.notifier.send(f"{SIG_EMOJI.get(lvl,'')} {lvl} 信号 · {sym}", msg, level=lvl)
+        self.write_dashboard()
+        return ranked
+
+    # ---- daily digest ----
+    def run_digest(self):
+        ranked = self.last_ranked or self.run_scan(emit=False) or []
+        coiling = sorted([r for r in ranked if r["label"] == "COILING"], key=lambda r: -r["score"])
+        fresh = [r for r in ranked if r["label"] == "FRESH_LAUNCH"]
+        launched = [r for r in ranked if r["label"] == "LAUNCHED"]
+        risk = [r for r in ranked if r["label"] in ("PUMPED", "CRASHING")]
+        date = self.utc_to_local(time.time()).strftime("%Y-%m-%d")
+
+        lines = [f"📅 每日妖币埋伏监控 · {date}", ""]
+        lines.append(f"扫描 {len(ranked)} 个合约妖币 | 埋伏候选 {len(coiling)} | 刚启动 {len(fresh)}")
+        lines.append("")
+        lines.append("🔥 埋伏观察列表（横盘蓄力，等第一根巨量启动）:")
+        if coiling:
+            for r in coiling[:18]:
+                star = "★" if r.get("vol_tick") else " "
+                pv = r.get("pv")
+                pv_s = f"{pv*100:+.0f}%" if pv is not None else "n/a"
+                lines.append(f"  {star} {r['sym']:<12} 分{r['score']:.0f}  价{r['price']:.6g}  "
+                             f"区间{r['range_w']*100:.1f}%  量能{'抬头' if r.get('vol_tick') else '静'}  vsMA99 {pv_s}")
+        else:
+            lines.append("  （暂无）")
+        lines.append("")
+        lines.append("⚡ 近期启动（做 S3→S4）:")
+        if fresh:
+            for r in fresh:
+                lines.append(f"  {r['sym']:<12} S{r['stage'][-1]}  价{r['price']:.6g}  {r['reason']}")
+        else:
+            lines.append("  （暂无）")
+        if launched:
+            lines.append("")
+            lines.append("👀 已启动动能衰减（可关注是否再洗盘）:")
+            for r in launched[:8]:
+                lines.append(f"  {r['sym']:<12} 价{r['price']:.6g}")
+        if risk:
+            lines.append("")
+            lines.append("⚠️ 需警惕（已拉完/崩盘，别接刀）:")
+            for r in risk[:10]:
+                lines.append(f"  {r['sym']:<12} {r['label']} 价{r['price']:.6g}")
+        lines.append("")
+        lines.append("信号会通过本渠道实时推送。手动交易，纪律第一。")
+        text = "\n".join(lines)
+        self.notifier.send(f"📅 每日妖币监控 · {date}", text, level="digest")
+        self.log_signal("DIGEST", "", f"每日摘要 · 监控 {len(ranked)} 币 · 埋伏 {len(coiling)} · 刚启动 {len(fresh)}")
+        # also save full HTML for reference
+        try:
+            from memecoin_scanner import build_html
+            html = build_html(ranked, [], 40, market=self.market)
+            with open(DIGEST_PATH, "w", encoding="utf-8") as f:
+                f.write(html)
+        except Exception as e:
+            print(f"[digest] html save skipped: {e}")
+        self.write_dashboard()
+
+    # ---- time ----
+    def utc_to_local(self, ts):
+        return datetime.fromtimestamp(ts, tz=timezone.utc) + timedelta(hours=self.local_offset)
+
+    # ---- loop ----
+    def loop(self):
+        if self.web_enabled:
+            self.server = DashboardServer(self.web_host, self.web_port)
+            self.server.start()
+        self.notifier.send("🟢 妖币埋伏监控器已启动",
+            f"市场: {self.market}\n监控池: {len(self.universe)} 个币\n"
+            f"扫描间隔: {self.scan_interval} 分钟\n每日摘要: 本地 {self.digest_hour}:00\n"
+            f"通知渠道: {self.notifier.channel}\n"
+            f"网页看板: {'http://'+self.web_host+':'+str(self.web_port) if self.web_enabled else '未启用'}\n\n"
+            f"只报警、不交易，你手动操作。", level="info")
+        self.log_signal("INFO", "", f"监控器已启动 · 监控 {len(self.universe)} 币 · 网页看板 "
+                                     f"{'开启' if self.web_enabled else '关闭'}")
+        last_scan = 0.0
+        last_digest_date = None
+        while not self.stop:
+            now = time.time()
+            if now - last_scan >= self.scan_interval * 60:
+                self.run_scan(emit=True)
+                last_scan = now
+            local = self.utc_to_local(now)
+            if local.hour == self.digest_hour and local.minute < 12 and local.date() != last_digest_date:
+                self.run_digest()
+                last_digest_date = local.date()
+            # heartbeat sleep
+            for _ in range(60):
+                if self.stop:
+                    break
+                time.sleep(1)
+        print("[monitor] stopping, flushing state ...")
+        if self.server:
+            self.server.shutdown()
+        self.save_state(self.load_state())
+
+    def request_stop(self):
+        self.stop = True
+
+
+# ----------------------------------------------------------------------------
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--config", default=os.path.join(HERE, "monitor_config.json"))
+    ap.add_argument("--once", action="store_true", help="单次扫描+推送后退出（测试用）")
+    ap.add_argument("--test-notify", action="store_true", help="仅测试通知渠道")
+    ap.add_argument("--no-emit", action="store_true", help="扫描但不推送信号（仅更新状态）")
+    ap.add_argument("--sym-list", default=None, help="测试用：覆盖监控池，e.g. RAVEUSDT,LABUSDT,BTWUSDT")
+    ap.add_argument("--web", action="store_true", help="启用网页看板 HTTP 服务")
+    ap.add_argument("--no-web", action="store_true", help="强制关闭网页看板")
+    ap.add_argument("--port", type=int, default=None, help="网页看板端口（覆盖配置）")
+    ap.add_argument("--host", default=None, help="网页看板绑定地址（覆盖配置）")
+    args = ap.parse_args()
+
+    cfg = load_config(args.config)
+    notifier = Notifier(cfg["notification"])
+
+    if args.test_notify:
+        notifier.test()
+        return
+
+    # web overrides: CLI > env PORT > config
+    web = cfg.setdefault("web", {})
+    if args.no_web:
+        web["enabled"] = False
+    if args.web:
+        web["enabled"] = True
+    if args.host:
+        web["host"] = args.host
+    if args.port:
+        web["port"] = args.port
+    env_port = os.environ.get("PORT")
+    if env_port:
+        try:
+            web["port"] = int(env_port)
+        except ValueError:
+            pass
+
+    monitor = Monitor(cfg, notifier)
+    if args.sym_list:
+        monitor.universe = [s.strip().upper() for s in args.sym_list.split(",") if s.strip()]
+
+    # graceful shutdown (Zeabur sends SIGTERM on redeploy/restart)
+    def handle(signum, frame):
+        print(f"[signal] received {signum}, stopping ...")
+        monitor.request_stop()
+    signal.signal(signal.SIGTERM, handle)
+    signal.signal(signal.SIGINT, handle)
+
+    if args.once:
+        monitor.run_scan(emit=not args.no_emit)
+        monitor.run_digest()
+        if monitor.web_enabled:
+            monitor.server = DashboardServer(monitor.web_host, monitor.web_port)
+            monitor.server.start()
+            print("[monitor] --once --web: serving dashboard, Ctrl-C to stop")
+            try:
+                while not monitor.stop:
+                    time.sleep(1)
+            except KeyboardInterrupt:
+                pass
+            if monitor.server:
+                monitor.server.shutdown()
+        return
+    monitor.loop()
+
+
+if __name__ == "__main__":
+    main()

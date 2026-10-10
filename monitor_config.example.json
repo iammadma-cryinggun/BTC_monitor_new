@@ -1,0 +1,21 @@
+{
+  "market": "futures",
+  "universe": "curated",
+  "symbols": [],
+  "scan_interval_minutes": 120,
+  "digest_hour": 8,
+  "local_utc_offset_hours": 8,
+  "request_sleep": 0.15,
+  "web": {
+    "enabled": true,
+    "host": "0.0.0.0",
+    "port": 8080
+  },
+  "notification": {
+    "channel": "telegram",
+    "telegram_bot_token": "",
+    "telegram_chat_id": "",
+    "webhook_url": "",
+    "webhook_format": "generic"
+  }
+}

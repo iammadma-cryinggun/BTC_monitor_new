@@ -1,0 +1,18 @@
+# ---- secrets: keep local only, never commit ----
+monitor_config.json
+
+# ---- runtime state / caches (regenerated at runtime) ----
+data/
+cache/
+cache_ashare/
+cache_panel/
+
+# ---- python artifacts ----
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# ---- temp ----
+*.tmp

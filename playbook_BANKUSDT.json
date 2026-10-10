@@ -1,0 +1,71 @@
+{
+  "name": "BANKUSDT",
+  "bars": 1000,
+  "range_start": "2026-04-26 16:00:00+00:00",
+  "range_end": "2026-10-10 04:00:00+00:00",
+  "levels": {
+    "price": 0.0285,
+    "ma25_4h": 0.028116,
+    "ma99_4h": 0.030764646464646467,
+    "ma99_1h": 0.028135353535353538,
+    "stage": "S3"
+  },
+  "stage_distribution": {
+    "S3": 460,
+    "S2": 324,
+    "S1": 111,
+    "S5": 53,
+    "S6": 52
+  },
+  "events": [
+    {
+      "type": "LAUNCH",
+      "i": 78,
+      "ts": "2026-05-09 16:00:00+00:00",
+      "price": 0.0411,
+      "note": "vol_ratio=6.6x breakout"
+    },
+    {
+      "type": "SHAKEOUT",
+      "i": 236,
+      "ts": "2026-06-05 00:00:00+00:00",
+      "price": 0.0295,
+      "note": "drawdown 31% from peak 0.0430"
+    },
+    {
+      "type": "WICKTOP",
+      "i": 492,
+      "ts": "2026-07-17 16:00:00+00:00",
+      "price": 0.066,
+      "note": "upper_wick=55% of range, high=0.0735"
+    },
+    {
+      "type": "CRASH",
+      "i": 567,
+      "ts": "2026-07-30 04:00:00+00:00",
+      "price": 0.1208,
+      "note": "drawdown 71% from peak 0.4140"
+    },
+    {
+      "type": "DEATHBOUNCE",
+      "i": 598,
+      "ts": "2026-08-04 08:00:00+00:00",
+      "price": 0.0522,
+      "note": "vol_ratio=3.3x rebound, failed (no new high)"
+    },
+    {
+      "type": "LAUNCH",
+      "i": 652,
+      "ts": "2026-08-13 08:00:00+00:00",
+      "price": 0.0435,
+      "note": "vol_ratio=3.7x breakout"
+    },
+    {
+      "type": "SHAKEOUT",
+      "i": 818,
+      "ts": "2026-09-10 00:00:00+00:00",
+      "price": 0.0299,
+      "note": "drawdown 31% from peak 0.0435"
+    }
+  ]
+}
