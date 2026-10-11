@@ -327,7 +327,9 @@ class Monitor:
         risk = [r for r in ranked if r["label"] in ("PUMPED", "CRASHING")]
         date = self.utc_to_local(time.time()).strftime("%Y-%m-%d")
 
-        lines = [f"📅 每日妖币埋伏监控 · {date}", ""]
+        # note: notifier.send() already prepends the title ("📅 每日妖币监控 · {date}"),
+        # so do NOT repeat it here (would show twice on Telegram).
+        lines = []
         src = getattr(self, "universe_source", "curated")
         lines.append(f"监控池 {src} · 池大小 {len(self.universe)} · 本轮有效 {len(ranked)} 币 | 埋伏候选 {len(coiling)} | 刚启动 {len(fresh)}")
         lines.append("")
