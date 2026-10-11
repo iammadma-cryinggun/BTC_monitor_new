@@ -27,6 +27,24 @@ DASH_PATH = os.path.join(DATA, "dashboard.html")
 DATA_JSON_PATH = os.path.join(DATA, "dashboard_data.json")
 SIGNALS_PATH = os.path.join(DATA, "signals_log.json")
 
+# Build/version marker so the deployed container can be identified at a glance.
+# Sourced from git at import time; falls back to "dev" when .git is absent
+# (e.g. a build context that strips VCS, or a local run).
+def get_build_sha():
+    try:
+        import subprocess
+        out = subprocess.run(
+            ["git", "-C", HERE, "rev-parse", "--short", "HEAD"],
+            capture_output=True, text=True, timeout=5)
+        sha = out.stdout.strip()
+        if sha:
+            return sha
+    except Exception:
+        pass
+    return "dev"
+
+BUILD_SHA = get_build_sha()
+
 SIG_EMOJI = {
     "ENTER": "🚀", "DIP": "💧", "AMBUSH": "🔥", "TOP": "⚠️",
     "CRASH": "🩸", "BOUNCE": "↩️", "INFO": "ℹ️", "DIGEST": "📅",
@@ -317,6 +335,7 @@ th{{color:var(--mut);font-weight:600;position:sticky;top:0;background:var(--card
 </div>
 
 <div class="note">数据来自 Binance 公开行情（只读、无 API key）。看板与 Telegram 推送同源：同一套六阶段检测器，进入/埋伏/见顶/崩盘信号会同时在两者出现。</div>
+<div class="note" style="margin-top:6px">看板构建版本: <b>{BUILD_SHA}</b>（若与最新 commit 不一致，说明 Zeabur 仍在运行旧容器，需手动 Redeploy）</div>
 
 <script>
 var next = {next_epoch_js};
@@ -353,7 +372,7 @@ def _row(r):
 # ----------------------------------------------------------------------------
 # Live shell (served fresh on every request; JS fetches data from JSON).
 def shell_html():
-    return """<!doctype html><html lang="zh"><head><meta charset="utf-8">
+    shell = """<!doctype html><html lang="zh"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>妖币埋伏监控 · 实时看板</title>
 <style>
@@ -401,6 +420,7 @@ th{color:var(--mut);font-weight:600;position:sticky;top:0;background:var(--card)
   <tbody id="sigs"></tbody></table>
 </div>
 <div class="note">数据来自 Binance 公开行情（只读、无 API key）。看板每 30 秒从 /dashboard_data.json 实时拉取，与 Telegram 推送同源。</div>
+<div class="note" style="margin-top:6px">看板构建版本: <b>__BUILD_SHA__</b>（若与最新 commit 不一致，说明 Zeabur 仍在运行旧容器，需手动 Redeploy）</div>
 <script>
 var NEXT = 0;
 var LAB = {COILING:"#f59e0b",FRESH_LAUNCH:"#22c55e",LAUNCHED:"#0ea5e9",PUMPED:"#ef4444",CRASHING:"#6b7280",LOW_VOL:"#4b5563",STABLE:"#4b5563",STOCK:"#4b5563",UNKNOWN:"#9ca3af"};
@@ -510,6 +530,7 @@ function load(){
 tick(); load(); setInterval(tick,1000); setInterval(load,30000);
 </script>
 </body></html>"""
+    return shell.replace("__BUILD_SHA__", BUILD_SHA)
 
 # ----------------------------------------------------------------------------
 class DashboardServer:
