@@ -580,6 +580,15 @@ class DashboardServer:
                         except Exception as e:
                             print(f"[web] memory snapshot failed ({e}); falling back to file")
                     self.path = "/dashboard_data.json"
+                elif self.path == "/dashboard.html":
+                    # The static snapshot stays on disk for offline/archival
+                    # use, but the HTTP route redirects to the live shell so
+                    # nobody gets stuck viewing a stale snapshot (the file is
+                    # only rewritten once per scan).
+                    self.send_response(302)
+                    self.send_header("Location", "/")
+                    self.end_headers()
+                    return
                 elif self.path == "/state.json":
                     self.path = "/monitor_state.json"
                 elif self.path == "/signals.json":
