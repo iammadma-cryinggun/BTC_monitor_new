@@ -440,7 +440,16 @@ class Monitor:
             self.write_dashboard()
         except Exception:
             pass
-        last_scan = 0.0
+        # Immediate first scan so the web panel is fresh WITHOUT waiting a full
+        # scan_interval. This populates self.last_ranked which BOTH the Telegram
+        # digest and the live web snapshot read from, so they stay in lockstep.
+        # prev is None on this baseline scan, so run_scan's emission guard
+        # suppresses any false signal flood; it does send the initial digest.
+        try:
+            self.run_scan(emit=True)
+        except Exception as e:
+            print(f"[startup] initial scan failed: {e}")
+        last_scan = time.time()
         last_digest_date = None
         while not self.stop:
             now = time.time()

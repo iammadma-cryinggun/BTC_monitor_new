@@ -137,6 +137,27 @@ def build_snapshot(ranked, signals, meta=None):
         "signals": signals or [],
     }
 
+
+def snapshot_from_monitor(mon):
+    """Build the dashboard JSON payload DIRECTLY from the live Monitor
+    in-memory state (self.last_ranked, self.scan_summary). This is the
+    authoritative source -- the very same data that drives the Telegram
+    digest -- so the web panel can never diverge from Telegram because of a
+    stale on-disk dashboard_data.json (e.g. a leftover snapshot from a
+    crash-loop restart on a persistent volume)."""
+    meta = {
+        "last_scan": (getattr(mon, "last_scan_iso", None)
+                      or datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")),
+        "next_scan_epoch": mon.next_scan_epoch(),
+        "market": getattr(mon, "market", "futures"),
+        "universe_source": getattr(mon, "universe_source", "curated"),
+        "universe_size": len(getattr(mon, "universe", []) or []),
+        "scan_interval_minutes": getattr(mon, "scan_interval", 120),
+        "scan_summary": getattr(mon, "scan_summary", {}) or {},
+    }
+    return build_snapshot(mon.last_ranked or [], load_signals(), meta)
+
+
 def write_dashboard(ranked, signals, meta=None, path=DASH_PATH):
     """Write both the static HTML snapshot (offline viewing) and the live
     dashboard_data.json (used by the web shell)."""
@@ -499,14 +520,16 @@ class DashboardServer:
     `/dashboard.html`      -> static snapshot (offline viewing)
     `/state.json` / `/signals.json` -> raw data files
     """
-    def __init__(self, host="0.0.0.0", port=8080, data_dir=DATA):
+    def __init__(self, host="0.0.0.0", port=8080, data_dir=DATA, monitor=None):
         self.host = host
         self.port = port
         self.data_dir = data_dir
+        self.monitor = monitor
         self.httpd = None
 
     def _handler(self):
         data_dir = self.data_dir
+        monitor = self.monitor
         class _H(http.server.SimpleHTTPRequestHandler):
             def __init__(self, *a, **k):
                 super().__init__(*a, directory=data_dir, **k)
@@ -520,6 +543,21 @@ class DashboardServer:
                     self.wfile.write(shell_html().encode("utf-8"))
                     return
                 elif self.path == "/dashboard_data.json":
+                    # Prefer the LIVE in-memory snapshot (same data that drives
+                    # the Telegram digest). Fall back to the on-disk file only
+                    # when no Monitor reference is wired in (e.g. --once mode).
+                    if monitor is not None:
+                        try:
+                            body = json.dumps(
+                                snapshot_from_monitor(monitor),
+                                ensure_ascii=False).encode("utf-8")
+                            self.send_response(200)
+                            self.send_header("Content-Type", "application/json; charset=utf-8")
+                            self.end_headers()
+                            self.wfile.write(body)
+                            return
+                        except Exception as e:
+                            print(f"[web] memory snapshot failed ({e}); falling back to file")
                     self.path = "/dashboard_data.json"
                 elif self.path == "/state.json":
                     self.path = "/monitor_state.json"
