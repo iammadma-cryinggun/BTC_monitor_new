@@ -379,6 +379,29 @@ class Monitor:
     def utc_to_local(self, ts):
         return datetime.fromtimestamp(ts, tz=timezone.utc) + timedelta(hours=self.local_offset)
 
+    # ---- startup state restore ----
+    def _restore_dashboard_state(self):
+        """Seed self.last_ranked / self.scan_summary from the last persisted
+        dashboard_data.json so the panel isn't blank (or clobbered by an empty
+        startup write) after a redeploy. The /app/data volume persists across
+        Zeabur restarts, so this is usually available. Real data overwrites
+        these on the first scan anyway."""
+        import json as _json
+        p = os.path.join(DATA, "dashboard_data.json")
+        if not os.path.exists(p):
+            return
+        with open(p, encoding="utf-8") as f:
+            snap = _json.load(f)
+        rk = snap.get("ranked") or []
+        if rk:
+            self.last_ranked = rk
+        m = snap.get("meta") or {}
+        ss = m.get("scan_summary")
+        if isinstance(ss, dict):
+            self.scan_summary = ss
+        print(f"[startup] restored previous dashboard: {len(rk)} coins, "
+              f"scan ok={ss.get('ok') if isinstance(ss, dict) else '?'}")
+
     # ---- loop ----
     def loop(self):
         if self.web_enabled:
@@ -403,8 +426,16 @@ class Monitor:
             f"只报警、不交易，你手动操作。", level="info")
         self.log_signal("INFO", "", f"监控器已启动 · 监控 {len(self.universe)} 币 · 网页看板 "
                                      f"{'开启' if self.web_enabled else '关闭'} · {conn_note}")
+        # restore last good dashboard state so a redeploy/restart doesn't blank
+        # the panel (and doesn't let an empty startup write clobber good data).
+        # On Zeabur the /app/data volume persists across restarts, so the
+        # previous scan's data is normally available; restore it before writing.
+        try:
+            self._restore_dashboard_state()
+        except Exception as e:
+            print(f"[startup] restore skipped: {e}")
         # write an initial dashboard immediately so the page shows pool size at once
-        # (the first full scan may take a while if the feed is slow/blocked)
+        # (now seeded with last good data if available, instead of 0/empty)
         try:
             self.write_dashboard()
         except Exception:

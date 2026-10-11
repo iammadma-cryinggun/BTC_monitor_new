@@ -102,6 +102,16 @@ def build_snapshot(ranked, signals, meta=None):
     except Exception:
         n_sig24 = len(signals)
     ss = meta.get("scan_summary") or {}
+    # The headline "retested OK" count must come from the authoritative scan
+    # result (scan_summary.ok), NOT from len(ranked). On a persistent volume
+    # (Zeabur) a stale/partial dashboard_data.json can have ranked.length <<
+    # scan_summary.ok (left over from a crash-loop restart). Driving the KPI
+    # from scan_summary keeps the headline consistent with the Telegram digest.
+    retest_ok = ss.get("ok", n_coins) if isinstance(ss.get("ok"), int) else n_coins
+    attempted = ss.get("attempted") if isinstance(ss.get("attempted"), int) else None
+    # integrity flag: rendered table set is far smaller than what was actually
+    # scored -> the on-disk file is stale/incomplete. Surface it.
+    ranked_lag = bool(retest_ok) and n_coins < max(1, retest_ok * 0.5)
     return {
         "meta": {
             "generated": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
@@ -115,10 +125,13 @@ def build_snapshot(ranked, signals, meta=None):
         },
         "kpis": {
             "pool_size": meta.get("universe_size", n_coins),
-            "retest_ok": n_coins,
+            "retest_ok": retest_ok,
+            "attempted": attempted,
+            "ranked_count": n_coins,
             "ambush": n_amb,
             "fresh": n_fresh,
             "sig24": n_sig24,
+            "ranked_lag": ranked_lag,
         },
         "ranked": ranked,
         "signals": signals or [],
@@ -402,13 +415,16 @@ function render(d){
   document.getElementById("sub").textContent =
     "生成 "+meta.generated+" ｜ 数据源 Binance USD-M 合约 ｜ 4h 六阶段 + 1h MA99 ｜ 时区 UTC ｜ 每 "+meta.scan_interval_minutes+" 分钟扫描一次（本页每 30 秒自动刷新）";
   var us=meta.universe_source||"curated", usz=meta.universe_size||ranked.length;
+  var rok = (typeof k.retest_ok==="number")?k.retest_ok:ranked.length;
   var uc = (us.indexOf("curated")===0 && usz<=90)?"#f87171":"#9ca3af";
-  document.getElementById("pool").innerHTML = '监控池 <b style="color:'+uc+'">'+us+'</b> · 池大小 '+usz+' · 本轮有效 '+ranked.length;
-  // KPIs
-  var broken = usz && ranked.length < Math.max(1, usz*0.5);
+  document.getElementById("pool").innerHTML = '监控池 <b style="color:'+uc+'">'+us+'</b> · 池大小 '+usz+' · 本轮有效 '+rok;
+  // KPIs — "本轮回测有效" uses the authoritative scan_summary.ok, not len(ranked),
+  // so a stale/partial dashboard_data.json (ranked.length<<ok) still shows the
+  // true count and stays consistent with the Telegram digest.
+  var broken = usz && rok < Math.max(1, usz*0.5);
   document.getElementById("kpis").innerHTML =
     '<div class="kpi">监控币数 <b>'+usz+'</b></div>'+
-    '<div class="kpi">本轮回测有效 <b style="color:'+(broken?"#f87171":"#fff")+'">'+ranked.length+'</b></div>'+
+    '<div class="kpi">本轮回测有效 <b style="color:'+(broken?"#f87171":"#fff")+'">'+rok+'</b></div>'+
     '<div class="kpi">🔥埋伏★ <b style="color:#f59e0b">'+(k.ambush||0)+'</b></div>'+
     '<div class="kpi">⚡刚启动 <b style="color:#22c55e">'+(k.fresh||0)+'</b></div>'+
     '<div class="kpi">近24h信号 <b>'+(k.sig24||0)+'</b></div>';
@@ -428,9 +444,16 @@ function render(d){
   var h="";
   if(broken){
     var rr=""; for(var k2 in (ss.skip_reasons||{})) rr+=" "+k2+":"+ss.skip_reasons[k2];
-    h='<div class="note" style="color:#f87171;margin-top:8px">⚠️ <b>数据获取异常</b>：本轮回测仅成功 <b>'+ranked.length+'/'+usz+'</b> 个币。'+
+    h='<div class="note" style="color:#f87171;margin-top:8px">⚠️ <b>数据获取异常</b>：本轮回测仅成功 <b>'+rok+'/'+usz+'</b> 个币。'+
       'Binance 行情拉取很可能被部署区域（云服务器常见）封锁。<br>排查：① 设置 <b>HTTPS_PROXY</b> 代理（指向 Binance 友好区域）；'+
       '② 把 Zeabur 区域切到 Binance 可访问区；③ 首轮失败会在缓存命中后自动恢复。<br>跳过原因：'+(rr.trim()||"网络/超时")+'。</div>';
+  } else if(k.ranked_lag){
+    // scan_summary says many coins scored, but the rendered table set is tiny ->
+    // the on-disk dashboard_data.json is stale/partial (e.g. left over from a
+    // crash-loop restart on a persistent volume). Headline numbers are correct
+    // (driven by scan_summary); the table will self-heal on the next scan.
+    h='<div class="note" style="color:#fbbf24;margin-top:8px">⚠️ <b>看板表格数据不完整</b>：本轮实际扫描成功 <b>'+rok+'</b> 个币，但本地仅渲染 <b>'+ranked.length+'</b> 个。'+
+      '这通常是持久化卷上的旧快照残留（崩溃重启期间产生），并非行情拉取失败。<br>下一轮扫描（每 '+meta.scan_interval_minutes+' 分钟）会自动重写并恢复完整列表；若长期不恢复，可在 Zeabur 清空 /app/data 卷后重启。</div>';
   }
   document.getElementById("health").innerHTML = h;
   // tables
@@ -441,7 +464,7 @@ function render(d){
   var capped=others.length>150, disp=watch.concat(others.slice(0,150));
   document.getElementById("watch").innerHTML = watch.map(row).join("") || '<tr><td colspan="9" class="rs">（暂无埋伏候选）</td></tr>';
   document.getElementById("full").innerHTML = disp.map(row).join("") || '<tr><td colspan="9" class="rs">（无数据）</td></tr>';
-  document.getElementById("fullh2").textContent = "📊 全量监控（按埋伏分排序，显示前 "+disp.length+" / 共 "+ranked.length+"）";
+  document.getElementById("fullh2").textContent = "📊 全量监控（按埋伏分排序，显示前 "+disp.length+" / 共 "+rok+"）";
   document.getElementById("fullnote").innerHTML = capped ? ("已按埋伏分截断显示前 150 行；全部 "+others.length+" 个币均已扫描，完整数据见 data/monitor_state.json。") : "";
   // signals
   var sg="";
