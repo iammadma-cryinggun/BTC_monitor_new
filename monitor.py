@@ -2,7 +2,7 @@
 24h Memecoin 埋伏监控器 —— 部署到 Zeabur 云端长期运行。
 
 它做什么（你手动交易，它只报警）:
-  - 周期性扫描 Binance USD-M 合约妖币池（默认 FUTURES_UNIVERSE，约 80 个）
+  - 周期性扫描 Binance USD-M 合约妖币池（默认 exchange 全量合约，约 400 个；拉取失败回退 FUTURES_UNIVERSE ~82）
   - 用六阶段剧本检测器 (memecoin_playbook_scanner.detect) 判定每个币当前阶段
   - 跨扫描维护 state.json，只在「阶段/事件发生转移」时推送信号:
         🚀 ENTER   新启动 (S2 第一根巨量突破)  -> 进观察列表做 S3->S4
@@ -44,7 +44,7 @@ SIG_ORDER = ["ENTER", "AMBUSH", "DIP", "TOP", "CRASH", "BOUNCE"]
 
 DEFAULT_CONFIG = {
     "market": "futures",
-    "universe": "curated",          # "curated" | "exchange" | "list"
+    "universe": "exchange",         # "exchange" (full ~400 perps, curated fallback) | "curated" | "list"
     "symbols": [],                  # used when universe=="list"
     "scan_interval_minutes": 120,   # 信号扫描间隔
     "digest_hour": 8,               # 本地时区的每日摘要时刻（小时）
@@ -381,14 +381,31 @@ class Monitor:
         if self.web_enabled:
             self.server = DashboardServer(self.web_host, self.web_port)
             self.server.start()
+        # startup connectivity self-check so we (and the user) know if Binance is reachable
+        try:
+            from memecoin_scanner import connectivity_check
+            chk = connectivity_check(self.market)
+            reachable = [k for k, v in chk.items() if not str(v).startswith("ERR")]
+            print(f"[connectivity] {chk}")
+            conn_note = (f"Binance 可达端点：{', '.join(reachable) or '无（可能被部署区域封锁，请配置 HTTPS_PROXY 或换区域）'}")
+        except Exception as e:
+            conn_note = f"连通性自检失败：{e}"
+            print(f"[connectivity] err {e}")
         self.notifier.send("🟢 妖币埋伏监控器已启动",
-            f"市场: {self.market}\n监控池: {len(self.universe)} 个币\n"
+            f"市场: {self.market}\n监控池: {len(self.universe)} 个币（{getattr(self,'universe_source','?')}）\n"
             f"扫描间隔: {self.scan_interval} 分钟\n每日摘要: 本地 {self.digest_hour}:00\n"
             f"通知渠道: {self.notifier.channel}\n"
-            f"网页看板: {'http://'+self.web_host+':'+str(self.web_port) if self.web_enabled else '未启用'}\n\n"
+            f"网页看板: {'http://'+self.web_host+':'+str(self.web_port) if self.web_enabled else '未启用'}\n"
+            f"{conn_note}\n\n"
             f"只报警、不交易，你手动操作。", level="info")
         self.log_signal("INFO", "", f"监控器已启动 · 监控 {len(self.universe)} 币 · 网页看板 "
-                                     f"{'开启' if self.web_enabled else '关闭'}")
+                                     f"{'开启' if self.web_enabled else '关闭'} · {conn_note}")
+        # write an initial dashboard immediately so the page shows pool size at once
+        # (the first full scan may take a while if the feed is slow/blocked)
+        try:
+            self.write_dashboard()
+        except Exception:
+            pass
         last_scan = 0.0
         last_digest_date = None
         while not self.stop:

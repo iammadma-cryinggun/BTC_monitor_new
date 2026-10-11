@@ -163,6 +163,20 @@ def build_dashboard_html(ranked, signals, meta=None):
     u_color = "#f87171" if u_src.startswith("curated") and u_size <= 90 else "var(--mut)"
     pool_line = f'监控池 <b style="color:{u_color}">{u_src}</b> · 池大小 {u_size} · 本轮有效 {n_coins}'
 
+    # data-feed health: if we scanned the pool but almost nothing came back, the
+    # Binance feed is likely blocked from this deployment (cloud IP geo-ban).
+    health = ""
+    feed_broken = bool(ss) and u_size and n_coins < max(1, int(u_size * 0.5))
+    if feed_broken:
+        rtxt = "  ".join(f"{k}:{v}" for k, v in ss.get("skip_reasons", {}).items())
+        health = (f'<div class="note" style="color:#f87171;margin-top:8px">'
+                  f'⚠️ <b>数据获取异常</b>：本轮回测仅成功 <b>{n_coins}/{u_size}</b> 个币。'
+                  f'Binance 行情拉取很可能被部署区域（云服务器常见）封锁。<br>'
+                  f'排查：① 设置 <b>HTTPS_PROXY</b> 代理（指向 Binance 友好区域）；'
+                  f'② 把 Zeabur 区域切到 Binance 可访问区；'
+                  f'③ 首轮失败会在缓存命中后自动恢复。<br>'
+                  f'跳过原因：{rtxt or "网络/超时"}。</div>')
+
     html = f"""<!doctype html><html lang="zh"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>妖币埋伏监控 · 实时看板</title>
@@ -191,13 +205,15 @@ th{{color:var(--mut);font-weight:600;position:sticky;top:0;background:var(--card
 
 <div class="card">
   <div class="kpis">
-    <div class="kpi">监控币数 <b>{n_coins}</b></div>
+    <div class="kpi">监控币数 <b>{u_size}</b></div>
+    <div class="kpi">本轮回测有效 <b style="color:{'#f87171' if (u_size and n_coins < u_size*0.5) else '#fff'}">{n_coins}</b></div>
     <div class="kpi">🔥埋伏★ <b style="color:#f59e0b">{n_amb}</b></div>
     <div class="kpi">⚡刚启动 <b style="color:#22c55e">{n_fresh}</b></div>
     <div class="kpi">近24h信号 <b>{n_sig24}</b></div>
   </div>
   <div class="note">上次扫描：{last_scan} ｜ 距下次扫描：<span id="cd" class="cnt">—</span> ｜ 手动交易，纪律第一，本看板只呈现信号、不代下单。</div>
   {diag}
+  {health}
 </div>
 
 <div class="card">

@@ -98,24 +98,62 @@ UA = {
     "Accept-Language": "en-US,en;q=0.9",
 }
 
+def _proxy_opener():
+    """Build an urllib opener that routes through HTTPS_PROXY/BINANCE_PROXY if set.
+
+    Cloud hosts (Zeabur, Render, Fly, AWS, GCP, ...) are frequently geo-blocked by
+    Binance, so a proxy in a Binance-friendly region is the most reliable fix. When
+    no proxy is configured we still return a real opener (with .open) so callers can
+    uniformly use opener.open(req, timeout=...).
+    """
+    p = None
+    for k in ("HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "BINANCE_PROXY"):
+        v = os.environ.get(k)
+        if v:
+            p = v.strip()
+            break
+    if not p:
+        return urllib.request.build_opener()
+    try:
+        return urllib.request.build_opener(
+            urllib.request.ProxyHandler({"http": p, "https": p}))
+    except Exception:
+        return urllib.request.build_opener()
+
 def fetch_klines(sym, interval, limit, market="spot"):
     import urllib.request, http.client, urllib.error
-    hosts = FUT_KLINE_HOSTS if market == "futures" else SPOT_KLINE_HOSTS
+    opener = _proxy_opener()
+    # Try every reachable host. For futures we also fall back to SPOT klines
+    # (api.binance.vision mirror is usually NOT geo-blocked) so that coins listed on
+    # both markets still get scored even if fapi is blocked from this host.
+    if market == "futures":
+        hosts = (FUT_KLINE_HOSTS
+                 + ["https://fapi3.binance.com/fapi/v1/klines",
+                    "https://fapi4.binance.com/fapi/v1/klines",
+                    "https://fapi5.binance.com/fapi/v1/klines"]
+                 + SPOT_KLINE_HOSTS
+                 + ["https://api.binance.vision/api/v3/klines"])
+    else:
+        hosts = (SPOT_KLINE_HOSTS
+                 + ["https://api.binance.vision/api/v3/klines"]
+                 + FUT_KLINE_HOSTS)
     last_err = None
-    for attempt in range(5):
-        host = hosts[attempt % len(hosts)]
+    for host in hosts:
         try:
             url = f"{host}?symbol={sym}&interval={interval}&limit={limit}"
             req = urllib.request.Request(url, headers=UA)
-            with urllib.request.urlopen(req, timeout=10) as resp:
+            with opener.open(req, timeout=10) as resp:
                 raw = resp.read()
             raw = json.loads(raw)
+            if not raw:
+                last_err = Exception("empty klines")
+                continue
             rows = [dict(ts_ms=int(k[0]), open=float(k[1]), high=float(k[2]),
                          low=float(k[3]), close=float(k[4]), volume=float(k[5])) for k in raw]
             return pd.DataFrame(rows)
         except (http.client.IncompleteRead, urllib.error.URLError, Exception) as e:
             last_err = e
-            time.sleep(0.4 * (attempt + 1))
+            time.sleep(0.3)
     raise last_err
 
 def get_universe(market="spot"):
@@ -151,7 +189,10 @@ def get_universe(market="spot"):
     if market == "futures":
         hosts = ["https://fapi.binance.com/fapi/v1/exchangeInfo",
                  "https://fapi1.binance.com/fapi/v1/exchangeInfo",
-                 "https://fapi2.binance.com/fapi/v1/exchangeInfo"]
+                 "https://fapi2.binance.com/fapi/v1/exchangeInfo",
+                 "https://fapi3.binance.com/fapi/v1/exchangeInfo",
+                 "https://fapi4.binance.com/fapi/v1/exchangeInfo",
+                 "https://fapi5.binance.com/fapi/v1/exchangeInfo"]
         skip = {"USDC","USDT","DAI","TUSD","FDUSD","EUR","BUSD","PYUSD","USDP","BTC","ETH","BNB"}
     else:
         hosts = ["https://api.binance.com/api/v3/exchangeInfo",
@@ -159,11 +200,12 @@ def get_universe(market="spot"):
                  "https://data-api.binance.vision/api/v3/exchangeInfo"]
         skip = {"USDC","USDT","DAI","TUSD","FDUSD","EUR","BUSD","PYUSD","USDP","BTC","ETH","BNB"}
 
+    opener = _proxy_opener()
     fetched = None
     for host in hosts:
         try:
             req = urllib.request.Request(host, headers=UA)
-            with urllib.request.urlopen(req, timeout=25) as resp:
+            with opener.open(req, timeout=25) as resp:
                 info = json.loads(resp.read())
             syms = []
             for s in info["symbols"]:
@@ -201,6 +243,31 @@ def get_universe(market="spot"):
           f"falling back to curated list ({len(fallback)} symbols). "
           f"Set MONITOR_UNIVERSE=curated to acknowledge, or fix network/region.")
     return fallback
+
+def connectivity_check(market="futures"):
+    """Quick reachability probe for the Binance endpoints we depend on.
+
+    Returns a dict {endpoint_name: HTTP status or 'ERR:...'}. Lets the monitor log
+    (and tell the user) whether Binance is reachable from this deployment, and which
+    fallback (fapi / vision mirror / proxy) actually works.
+    """
+    import urllib.request, urllib.error
+    opener = _proxy_opener()
+    probes = [
+        ("fapi", "https://fapi.binance.com/fapi/v1/ping"),
+        ("fapi3", "https://fapi3.binance.com/fapi/v1/ping"),
+        ("vision_spot", "https://api.binance.vision/api/v3/ping"),
+        ("data_api_vision", "https://data-api.binance.vision/api/v3/ping"),
+    ]
+    out = {}
+    for name, url in probes:
+        try:
+            req = urllib.request.Request(url, headers=UA)
+            with opener.open(req, timeout=8) as r:
+                out[name] = r.status
+        except Exception as e:
+            out[name] = f"ERR:{type(e).__name__}"
+    return out
 
 def load_or_fetch(sym, interval, limit, market="spot", force_fetch=False):
     scan_dir = os.path.join(DATA, f"scan_{market}")

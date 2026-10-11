@@ -33,14 +33,15 @@
 > 也可以**不写 config 文件**，直接用环境变量注入（优先级高于 `monitor_config.json`）：`TELEGRAM_BOT_TOKEN`、`TELEGRAM_CHAT_ID`、`WEBHOOK_URL`。适合 Zeabur / CI 等不提交密钥的场景。`monitor_config.json` 已被 `.gitignore` 忽略，仓库内置的是 `monitor_config.example.json` 占位模板，克隆后需自行补一份或设环境变量。
 >
 > **更多可调环境变量**（Zeabur 后台直接改，无需改代码）：
-> - `MONITOR_UNIVERSE`：`curated`（默认，~80 精选妖币）｜ `exchange`（动态拉全部真实永续，自动剔除下架币、覆盖新上币，推荐用这个让监控池始终有效）｜ `list`（配合 `monitor_config.json` 的 `symbols`）
+> - `MONITOR_UNIVERSE`：`exchange`（**默认**，动态拉全部真实永续 ~400 个，自动剔除下架币、覆盖新上币，监控池始终有效，拉取失败回退 curated ~82）｜ `curated`（写死 ~80 精选妖币）｜ `list`（配合 `monitor_config.json` 的 `symbols`）
 > - `MONITOR_MARKET`：`futures`（默认，妖币主战场）｜ `spot`
 > - `SCAN_INTERVAL_MINUTES`：扫描间隔，默认 120
 > - `DIGEST_HOUR`：每日摘要的本地时刻（小时），默认 8
 > - `LOCAL_UTC_OFFSET`：本地时区相对 UTC 偏移，默认 8（北京时间）
 > - `REQUEST_SLEEP`：每币请求间隔（秒），默认 0.15，调大可进一步降权防封
+> - `HTTPS_PROXY` / `BINANCE_PROXY`：可选。若部署区域（云服务器常见）被 Binance 封锁导致「本轮回测有效」远低于「监控币数」，在此填入一个 Binance 友好区域的 HTTP(S) 代理，行情拉取即走代理。留空则直连。
 >
-> **若看板上「监控币数」远小于预期**（例如只有 3/80），多半是 curated 列表里大量 symbol 在合约上已不存在（404）或被限流。把 `MONITOR_UNIVERSE` 设成 `exchange` 即可让监控池回到全量真实永续。看板顶部「扫描诊断」一行会显示尝试/成功/跳过(及原因)，用于定位。
+> **若看板上「本轮回测有效」远小于「监控币数」**（例如只有 1/400 或 1/82）：`监控币数` 现在显示的是**监控池总量**，`本轮回测有效` 才是本轮真正拉到行情的币数。若后者接近 0，几乎可以断定 **Binance 行情被部署区域封锁**（云服务器 IP 被 Binance 风控是常态）。排查顺序：① 看板「扫描诊断」行的跳过原因（多为 `network`）；② 在 Zeabur 设 `HTTPS_PROXY` 指向 Binance 友好区域的代理；③ 把 Zeabur 区域切到 Binance 可访问区；④ 启动日志的 `[connectivity]` 自检会列出当前可达的端点（fapi / vision 镜像 / 代理）。脚本已自动对 futures 行情追加 `api.binance.vision` 镜像兜底——spot 上市的妖币即使 fapi 被墙也能照常评分。
 
 ### 本地试运行
 
@@ -69,9 +70,9 @@ python monitor.py --web --port 8080
 6. 在 Service 的 **Environment Variables / Secrets** 里设好（密钥项勾选 Secret）：
    - `TELEGRAM_BOT_TOKEN`（Secret）— 否则收不到 Telegram 警报
    - `TELEGRAM_CHAT_ID`（Secret）
-   - `MONITOR_UNIVERSE` = `exchange` — **推荐**，动态拉全部真实永续，监控池始终有效（默认 `curated` 写死 ~80 个 symbol，很多已下架会显示「跳过」）
+   - `MONITOR_UNIVERSE` = `exchange` — **已为默认**，动态拉全部真实永续（~400 个），监控池始终有效；拉取失败自动回退 curated ~82
    - `PORT`（Zeabur 自动给，可留空让其注入）
-   - 其余调优变量可选：`MONITOR_MARKET` / `SCAN_INTERVAL_MINUTES` / `DIGEST_HOUR` / `LOCAL_UTC_OFFSET` / `REQUEST_SLEEP`（见上方说明）
+   - 其余调优变量可选：`MONITOR_MARKET` / `SCAN_INTERVAL_MINUTES` / `DIGEST_HOUR` / `LOCAL_UTC_OFFSET` / `REQUEST_SLEEP` / `HTTPS_PROXY`（见上方说明）；若看板「本轮回测有效」接近 0，优先加 `HTTPS_PROXY`
    - 不需任何密钥也能跑（回退到 `log` 通道）；但 Telegram 凭据建议用 Secrets 注入。
 7. **Volume**：挂一个持久卷到 `/app/data`，否则重启后监控状态/信号历史会丢失。
 8. **敏感项**：`monitor_config.json` 含 Telegram token，建议用 Zeabur 的 Environment Variables / Secrets 注入，或私有仓库 + 不公开 config。
