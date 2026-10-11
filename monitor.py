@@ -393,7 +393,11 @@ class Monitor:
         with open(p, encoding="utf-8") as f:
             snap = _json.load(f)
         rk = snap.get("ranked") or []
-        if rk:
+        # Guard against seeding a tiny stale snapshot (e.g. a 1-coin BANKUSDT
+        # leftover from a crash-loop restart). A healthy restore should have
+        # dozens+ of coins; anything smaller is discarded so the panel doesn't
+        # flash stale data before the immediate first scan repopulates it.
+        if len(rk) >= 50:
             self.last_ranked = rk
         m = snap.get("meta") or {}
         ss = m.get("scan_summary")
@@ -402,10 +406,25 @@ class Monitor:
         print(f"[startup] restored previous dashboard: {len(rk)} coins, "
               f"scan ok={ss.get('ok') if isinstance(ss, dict) else '?'}")
 
+    def _purge_test_signals(self):
+        """Drop obviously-fake test signals (msg contains 'test') left over on
+        the persistent volume, so the live signal feed isn't polluted by old
+        smoke-test artifacts. Idempotent and safe (only matches 'test')."""
+        import json as _json
+        from dashboard import SIGNALS_PATH, load_signals
+        sigs = load_signals()
+        if not sigs:
+            return
+        kept = [s for s in sigs if "test" not in (s.get("msg") or "").lower()]
+        if len(kept) != len(sigs):
+            with open(SIGNALS_PATH, "w", encoding="utf-8") as f:
+                _json.dump(kept, f, indent=2, default=str)
+            print(f"[startup] purged {len(sigs)-len(kept)} test-signal artifact(s)")
+
     # ---- loop ----
     def loop(self):
         if self.web_enabled:
-            self.server = DashboardServer(self.web_host, self.web_port)
+            self.server = DashboardServer(self.web_host, self.web_port, monitor=self)
             self.server.start()
         # startup connectivity self-check so we (and the user) know if Binance is reachable
         try:
@@ -434,6 +453,10 @@ class Monitor:
             self._restore_dashboard_state()
         except Exception as e:
             print(f"[startup] restore skipped: {e}")
+        try:
+            self._purge_test_signals()
+        except Exception as e:
+            print(f"[startup] purge skipped: {e}")
         # write an initial dashboard immediately so the page shows pool size at once
         # (now seeded with last good data if available, instead of 0/empty)
         try:
@@ -527,7 +550,7 @@ def main():
         monitor.run_scan(emit=not args.no_emit)
         monitor.run_digest()
         if monitor.web_enabled:
-            monitor.server = DashboardServer(monitor.web_host, monitor.web_port)
+            monitor.server = DashboardServer(monitor.web_host, monitor.web_port, monitor=monitor)
             monitor.server.start()
             print("[monitor] --once --web: serving dashboard, Ctrl-C to stop")
             try:
