@@ -38,6 +38,7 @@ from dashboard import DashboardServer, append_signal, load_signals, write_dashbo
 
 STATE_PATH = os.path.join(HERE, "data", "monitor_state.json")
 DIGEST_PATH = os.path.join(HERE, "data", "daily_digest.html")
+DATA = os.path.join(HERE, "data")
 
 SIG_EMOJI = {"ENTER": "🚀", "DIP": "💧", "AMBUSH": "🔥", "TOP": "⚠️", "CRASH": "🩸", "BOUNCE": "↩️"}
 SIG_ORDER = ["ENTER", "AMBUSH", "DIP", "TOP", "CRASH", "BOUNCE"]
