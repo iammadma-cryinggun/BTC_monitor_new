@@ -23,6 +23,7 @@ Usage:
   python memecoin_scanner.py --sym-list DOGEUSDT,PEPEUSDT
 """
 import os, sys, json, argparse, time
+import urllib.request, urllib.error, http.client
 import pandas as pd, numpy as np
 
 HERE = os.path.dirname(os.path.abspath(__file__))
