@@ -322,9 +322,18 @@ class Monitor:
     def run_digest(self):
         ranked = self.last_ranked or self.run_scan(emit=False) or []
         coiling = sorted([r for r in ranked if r["label"] == "COILING"], key=lambda r: -r["score"])
-        fresh = [r for r in ranked if r["label"] == "FRESH_LAUNCH"]
-        launched = [r for r in ranked if r["label"] == "LAUNCHED"]
-        risk = [r for r in ranked if r["label"] in ("PUMPED", "CRASHING")]
+        # Sort the secondary sub-lists by *relevance*, not by symbol (the universe
+        # is alphabetically sorted, so an unsorted slice makes every list look
+        # artificially clustered by prefix -- e.g. all "1000xxx" or all "A...").
+        #   fresh   -> most recently launched first (lowest launch_recency)
+        #   launched-> same: freshest breakouts are the ones most likely to shake out next
+        #   risk    -> biggest recent move first (most urgent to avoid)
+        fresh = sorted([r for r in ranked if r["label"] == "FRESH_LAUNCH"],
+                       key=lambda r: r.get("launch_recency") if r.get("launch_recency") is not None else 1e9)
+        launched = sorted([r for r in ranked if r["label"] == "LAUNCHED"],
+                          key=lambda r: r.get("launch_recency") if r.get("launch_recency") is not None else 1e9)
+        risk = sorted([r for r in ranked if r["label"] in ("PUMPED", "CRASHING")],
+                      key=lambda r: -abs(r.get("day_move") or 0))
         date = self.utc_to_local(time.time()).strftime("%Y-%m-%d")
 
         # note: notifier.send() already prepends the title ("📅 每日妖币监控 · {date}"),
@@ -352,14 +361,18 @@ class Monitor:
             lines.append("  （暂无）")
         if launched:
             lines.append("")
-            lines.append("👀 已启动动能衰减（可关注是否再洗盘）:")
+            lines.append("👀 已启动动能衰减（按启动先后排列，可关注是否再洗盘）:")
             for r in launched[:8]:
-                lines.append(f"  {r['sym']:<12} 价{r['price']:.6g}")
+                rec = r.get("launch_recency")
+                rec_s = f"{rec}根4h前" if isinstance(rec, int) else "?"
+                lines.append(f"  {r['sym']:<12} 价{r['price']:.6g}  启动于{rec_s}  {r['reason']}")
         if risk:
             lines.append("")
-            lines.append("⚠️ 需警惕（已拉完/崩盘，别接刀）:")
+            lines.append("⚠️ 需警惕（已拉完/崩盘，别接刀；按近1日振幅排序）:")
             for r in risk[:10]:
-                lines.append(f"  {r['sym']:<12} {r['label']} 价{r['price']:.6g}")
+                dm = r.get("day_move")
+                dm_s = f"{dm*100:+.1f}%" if isinstance(dm, (int, float)) else "—"
+                lines.append(f"  {r['sym']:<12} {r['label']} 价{r['price']:.6g}  ~1日{dm_s}")
         lines.append("")
         lines.append("信号会通过本渠道实时推送。手动交易，纪律第一。")
         text = "\n".join(lines)
