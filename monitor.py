@@ -95,7 +95,37 @@ def event_sig(e):
     return f"{e.get('type')}@{e.get('ts')}"
 
 
-def classify(sym, rec, prev):
+def timing_gate(sym, market="futures", btc_regime=None, kind="enter"):
+    """One-line 15m entry-timing verdict (VWAP + 9/20 EMA gate). Empty on failure.
+
+    kind: "enter" = breakout entry (momentum follows the break),
+          "ambush"/"dip" = buying a zone -> wait for the price to RECLAIM
+          the VWAP before paying up (never catch a falling knife)."""
+    try:
+        import timing
+        t = timing.analyze(sym, market=market)
+    except Exception:
+        return ""
+    if not t:
+        return ""
+    rg = timing.REGIME_CN.get(btc_regime, "—") if btc_regime else "—"
+    ok = t["ready"]
+    if kind == "enter":
+        if ok and btc_regime != "bearish":
+            return (f"\n🟢 点位闸门开：15m 价>VWAP + EMA9>20 多头（大盘{rg}）。"
+                    f"可按突破进场，带止损。")
+        if ok and btc_regime == "bearish":
+            return ("\n🟡 点位就绪，但大盘逆风（BTC 15m 空头排列）：减半仓，"
+                    "或等 BTC 回上 VWAP 再加。")
+        return (f"\n🔴 点位未就绪（15m 价 vs VWAP {t['vwap_dist']*100:+.1f}%，"
+                f"EMA{'多头' if t['ema_bull'] else '空头'}）：等价回上 VWAP 再进，防假突破砸回。")
+    if ok:
+        return f"\n⚡ 点位就绪（15m 价>VWAP，EMA多头）：现在就是打仓位的位置。大盘{rg}。"
+    return (f"\n✋ 点位未就绪（15m 价 vs VWAP {t['vwap_dist']*100:+.1f}%，"
+            f"EMA{'多头' if t['ema_bull'] else '空头'}）：等回上 VWAP 再打，别接下落刀。大盘{rg}。")
+
+
+def classify(sym, rec, prev, btc_regime=None, market="futures"):
     """Return (signals, current_event_sigs). signals = list of (level, msg, ev)."""
     cur_sigs = set(event_sig(e) for e in rec.get("events", []))
     prev_sigs = set(prev.get("event_sigs", [])) if prev else set()
@@ -113,11 +143,13 @@ def classify(sym, rec, prev):
                          f"{'强' if tbr >= 0.55 else '一般'}）")
             signals.append(("ENTER",
                 f"{sym} 新启动 (S2)：横盘后第一根巨量突破（{note}）。{cvd_s}\n"
-                f"按剧本进观察列表，等待 S3 洗盘后做 S3→S4 主升。", e))
+                f"按剧本进观察列表，等待 S3 洗盘后做 S3→S4 主升。"
+                + timing_gate(sym, market, btc_regime, "enter"), e))
         elif t == "SHAKEOUT":
             signals.append(("DIP",
                 f"{sym} 进入 S3 洗盘（{note}）。\n"
-                f"这是剧本里的低吸区，用 4h 移动止损，别用固定止损。", e))
+                f"这是剧本里的低吸区，用 4h 移动止损，别用固定止损。"
+                + timing_gate(sym, market, btc_regime, "dip"), e))
         elif t == "WICKTOP":
             signals.append(("TOP",
                 f"{sym} 4h 出现长上影插针（{note}）。\n"
@@ -164,7 +196,8 @@ def classify(sym, rec, prev):
             f"横盘 {rec.get('flat_run')} 根 4h，区间 {rec.get('range_w',0)*100:.1f}% 宽，"
             f"价 vs 4h MA99 = {pv_s}。{dv_s}\n"
             f"打法：横盘区内即可分批埋伏（本信号即入场窗口，-20%破位止损）；\n"
-            f"或等 🚀ENTER（第一根巨量突破）确认后再入——更稳但价更高。", None))
+            f"或等 🚀ENTER（第一根巨量突破）确认后再入——更稳但价更高。"
+            + timing_gate(sym, market, btc_regime, "ambush"), None))
     # 次级蓄力★：COILING_LITE + 量能刚抬头（且之前不是这个状态）。
     # 大盘币新周期形态：20 日振幅不够妖币门槛，用更久横盘 + 贴 MA99 补偿。
     lite_now = (rec["label"] == "COILING_LITE" and rec.get("vol_tick"))
@@ -188,7 +221,8 @@ def classify(sym, rec, prev):
             f"横盘 {rec.get('flat_run')} 根 4h（比主档更久），区间 {rec.get('range_w',0)*100:.1f}% 宽，"
             f"20 日振幅 {rec.get('swing',0)*100:.0f}%（未达妖币门槛 130%），"
             f"价 vs 4h MA99 = {pv_s}。{dv_s}\n"
-            f"可小仓位埋伏（小于主档），等第一根巨量突破加仓。追踪器按次级档分开算胜率。", None))
+            f"可小仓位埋伏（小于主档），等第一根巨量突破加仓。追踪器按次级档分开算胜率。"
+            + timing_gate(sym, market, btc_regime, "ambush"), None))
     return signals, cur_sigs
 
 
@@ -324,6 +358,17 @@ class Monitor:
                 print(f"[deriv] funding fetch failed: {e}")
         oi_budget = [80]   # max per-coin OI history calls per scan
         OI_LABELS = ("COILING", "COILING_LITE", "FRESH_LAUNCH", "LAUNCHED")
+        # BTC 15m regime (VWAP + 9/20 EMA) — computed once per scan, gates all
+        # entry-type signal messages ("don't recommend fresh longs into a dump")
+        self.btc_regime = None
+        if not offline:
+            try:
+                import timing
+                self.btc_regime = timing.regime(market=self.market)
+                if self.btc_regime:
+                    print(f"[timing] BTC 15m regime: {self.btc_regime}")
+            except Exception as e:
+                print(f"[timing] regime failed: {e}")
         for sym in self.universe:
             try:
                 rec, err = score_coin(sym, market=self.market, force_fetch=not offline)
@@ -365,7 +410,8 @@ class Monitor:
                     pass
             ranked.append(rec)
             prev = state.get(sym)
-            signals, cur_sigs = classify(sym, rec, prev)
+            signals, cur_sigs = classify(sym, rec, prev,
+                                         btc_regime=self.btc_regime, market=self.market)
             state_out[sym] = {
                 "label": rec["label"], "stage": rec["stage"], "score": rec["score"],
                 "vol_tick": rec.get("vol_tick"), "price": rec["price"],
@@ -378,6 +424,20 @@ class Monitor:
                 for lvl, msg, ev in signals:
                     new_signals.append((lvl, sym, msg, ev))
             time.sleep(self.request_sleep)
+        # entry-timing badges for the watchlist top slice (15m VWAP/EMA gate):
+        # one extra 15m kline call per coin, capped at 12, so dashboards and
+        # the Telegram agent can show ⚡/✋ without refetching
+        try:
+            import timing
+            watch_top = sorted(
+                [r for r in ranked if r.get("label") in ("COILING", "COILING_LITE", "FRESH_LAUNCH")],
+                key=lambda r: -r.get("score", 0))[:12]
+            for r in watch_top:
+                t = timing.analyze(r["sym"], market=self.market)
+                if t:
+                    r["timing"] = t
+        except Exception as e:
+            print(f"[timing] watch badges skipped: {e}")
         self.save_state(state_out)
         self.last_ranked = ranked
         self.last_scan_iso = now_iso()
@@ -456,11 +516,23 @@ class Monitor:
         src = getattr(self, "universe_source", "curated")
         lines.append(f"监控池 {src} · 池大小 {len(self.universe)} · 本轮有效 {len(ranked)} 币 | "
                      f"埋伏候选 {len(coiling)} | 次级 {sum(1 for r in ranked if r['label']=='COILING_LITE')} | 刚启动 {len(fresh)}")
+        rg = None
+        try:
+            import timing as _timing
+            rg = _timing.regime(market=self.market) or getattr(self, "btc_regime", None)
+        except Exception:
+            rg = getattr(self, "btc_regime", None)
+        if rg:
+            _cn = {"bullish": "多头", "bearish": "空头", "neutral": "中性"}.get(rg, rg)
+            lines.append(f"大盘点位闸门（BTC 15m VWAP+EMA）：{_cn}"
+                         + ("——逆风期，新埋伏减半或推迟" if rg == "bearish" else ""))
         lines.append("")
         lines.append("🔥 埋伏观察列表（横盘蓄力，等第一根巨量启动）:")
         if coiling:
             for r in coiling[:18]:
                 star = "★" if r.get("vol_tick") else " "
+                tm = r.get("timing") or {}
+                tmk = "⚡" if tm.get("ready") else ("✋" if tm else " ")
                 pv = r.get("pv")
                 pv_s = f"{pv*100:+.0f}%" if pv is not None else "n/a"
                 m1 = r.get("ma99_1h")
@@ -473,9 +545,10 @@ class Monitor:
                 if isinstance(oc, (int, float)):
                     dv.append(f"OI{oc*100:+.0f}%")
                 dv_s = ("  " + "·".join(dv)) if dv else ""
-                lines.append(f"  {star} {r['sym']:<12} 分{r['score']:.0f}  价{r['price']:.6g}  "
+                lines.append(f"  {star}{tmk} {r['sym']:<12} 分{r['score']:.0f}  价{r['price']:.6g}  "
                              f"区间{r['range_w']*100:.1f}%  量能{'抬头' if r.get('vol_tick') else '静'}  "
                              f"vsMA99 {pv_s}  1hM99 {pv1_s}{dv_s}")
+            lines.append("  （⚡=15m 点位就绪：价>VWAP 且 EMA9>20；✋=未就绪。只盯 ⚡ 打仓位）")
         else:
             lines.append("  （暂无）")
         lines.append("")

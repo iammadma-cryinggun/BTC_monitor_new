@@ -108,15 +108,26 @@ def _spark_svg(vals, w=120, h=30, color="#3b82f6"):
             f'stroke="{color}" stroke-width="1.4"/></svg>')
 
 # ----------------------------------------------------------------------------
+def _timing_mark(r):
+    """⚡ when the 15m entry gate is ready (price>VWAP & EMA9>20), ✋ when not.
+    Only the watchlist top slice gets timing data — others show nothing."""
+    t = r.get("timing") or {}
+    if not t:
+        return ""
+    return "⚡" if t.get("ready") else "✋"
+
+
 def _disp_label(r):
     lab = r.get("label")
+    tm = _timing_mark(r)
     if lab == "COILING":
-        return "🔥埋伏★" if r.get("vol_tick") else "观察"
+        return ("🔥埋伏★" if r.get("vol_tick") else "观察") + tm
     if lab == "COILING_LITE":
-        return "🔵次级★" if r.get("vol_tick") else "次级蓄力"
-    return {"FRESH_LAUNCH": "⚡刚启动", "LAUNCHED": "已启动", "PUMPED": "已拉完",
+        return ("🔵次级★" if r.get("vol_tick") else "次级蓄力") + tm
+    base = {"FRESH_LAUNCH": "⚡刚启动", "LAUNCHED": "已启动", "PUMPED": "已拉完",
             "CRASHING": "崩盘中", "LOW_VOL": "低波动", "STABLE": "稳定币",
             "STOCK": "代币股", "UNKNOWN": "未知"}.get(lab, str(lab))
+    return base + (tm if lab == "FRESH_LAUNCH" else "")
 
 LAB_COLOR = {"COILING": "#f59e0b", "COILING_LITE": "#38bdf8", "FRESH_LAUNCH": "#22c55e", "LAUNCHED": "#0ea5e9",
              "PUMPED": "#ef4444", "CRASHING": "#6b7280", "LOW_VOL": "#4b5563",
@@ -341,7 +352,7 @@ th{{color:var(--mut);font-weight:600;position:sticky;top:0;background:var(--card
 </div>
 
 <div class="card">
-  <div class="h2">🔥 埋伏观察列表（横盘蓄力 / 刚启动，盯紧第一根巨量突破）</div>
+  <div class="h2">🔥 埋伏观察列表（横盘蓄力 / 刚启动，盯紧第一根巨量突破；⚡=15m点位就绪：价>VWAP且EMA9>20，✋=未就绪）</div>
   <table><tr><th>币种</th><th>标签</th><th>阶段</th><th>分</th><th>现价</th><th>vsMA99</th><th>1hMA99</th><th>OI·费率</th><th>~1日</th><th>4h走势</th><th>依据</th></tr>
   {watch_rows}
   </table>
@@ -450,7 +461,7 @@ th{color:var(--mut);font-weight:600;position:sticky;top:0;background:var(--card)
   <div id="health"></div>
 </div>
 <div class="card">
-  <div class="h2">🔥 埋伏观察列表（横盘蓄力 / 刚启动，盯紧第一根巨量突破）</div>
+  <div class="h2">🔥 埋伏观察列表（横盘蓄力 / 刚启动，盯紧第一根巨量突破；⚡=15m点位就绪：价>VWAP且EMA9>20，✋=未就绪）</div>
   <table><tr><th>币种</th><th>标签</th><th>阶段</th><th>分</th><th>现价</th><th>vsMA99</th><th>1hMA99</th><th>OI·费率</th><th>~1日</th><th>4h走势</th><th>依据</th></tr>
   <tbody id="watch"></tbody></table>
 </div>
@@ -477,11 +488,18 @@ th{color:var(--mut);font-weight:600;position:sticky;top:0;background:var(--card)
 <script>
 var NEXT = 0;
 var LAB = {COILING:"#f59e0b",COILING_LITE:"#38bdf8",FRESH_LAUNCH:"#22c55e",LAUNCHED:"#0ea5e9",PUMPED:"#ef4444",CRASHING:"#6b7280",LOW_VOL:"#4b5563",STABLE:"#4b5563",STOCK:"#4b5563",UNKNOWN:"#9ca3af"};
+function tmark(r){
+  var t=r.timing||{};
+  if(!t.ready&&t.ready!==false) return "";
+  return t.ready?"⚡":"✋";
+}
 function dispLabel(r){
-  if(r.label==="COILING") return r.vol_tick?"🔥埋伏★":"观察";
-  if(r.label==="COILING_LITE") return r.vol_tick?"🔵次级★":"次级蓄力";
+  var tm=tmark(r);
+  if(r.label==="COILING") return (r.vol_tick?"🔥埋伏★":"观察")+tm;
+  if(r.label==="COILING_LITE") return (r.vol_tick?"🔵次级★":"次级蓄力")+tm;
   var m={FRESH_LAUNCH:"⚡刚启动",LAUNCHED:"已启动",PUMPED:"已拉完",CRASHING:"崩盘中",LOW_VOL:"低波动",STABLE:"稳定币",STOCK:"代币股",UNKNOWN:"未知"};
-  return m[r.label]||r.label;
+  var b=m[r.label]||r.label;
+  return r.label==="FRESH_LAUNCH"?b+tm:b;
 }
 function fmtPct(x){ if(typeof x!=="number") return "—"; var s=(x>=0?"+":"")+(x*100).toFixed(x>-0.1&&x<0.1?1:0)+"%"; return s; }
 function fmtPrice(p){ if(p==null) return "—"; if(p>=1) return p.toFixed(4); if(p>=0.01) return p.toFixed(5); if(p>0) return p.toPrecision(4); return p; }

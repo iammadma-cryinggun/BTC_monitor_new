@@ -246,6 +246,8 @@ class TelegramAgent:
             lines.append(f"🔥 埋伏观察列表（{len(rk)} 个，按分排序，前 12）：")
             for r in rk[:12]:
                 star = "★" if r.get("vol_tick") else " "
+                tm = r.get("timing") or {}
+                tmk = "⚡" if tm.get("ready") else ("✋" if tm else " ")
                 fd, oc = r.get("funding"), r.get("oi_chg_24h")
                 dv = []
                 if isinstance(fd, (int, float)):
@@ -255,9 +257,10 @@ class TelegramAgent:
                 dv_s = ("·" + "·".join(dv)) if dv else ""
                 m1 = r.get("ma99_1h")
                 pv1 = (r["price"] / m1 - 1.0) if (isinstance(m1, (int, float)) and m1 > 0) else None
-                lines.append(f" {star} {r['sym']:<13} 分{r['score']:.0f} 价{r['price']:.6g} "
+                lines.append(f" {star}{tmk} {r['sym']:<13} 分{r['score']:.0f} 价{r['price']:.6g} "
                              f"vsMA99 {_f(r.get('pv'))} 1hM99 {_f(pv1)}{dv_s}")
-            lines.append("★=量能抬头（埋伏★条件）。完整列表看网页看板。")
+            lines.append("★=量能抬头 · ⚡=15m 点位就绪（价>VWAP 且 EMA9>20）· ✋=未就绪。"
+                         "只盯 ⚡ 打仓位。完整列表看网页看板。")
         if lite:
             lines.append("")
             lines.append(f"🔵 次级蓄力（{len(lite)} 个，大盘币新周期横盘，仓位小于主档）：")
@@ -421,6 +424,22 @@ class TelegramAgent:
             squeeze = (isinstance(fd, (int, float)) and fd < 0
                        and isinstance(oc, (int, float)) and oc > 0.10)
             lines.append("·".join(dv) + ("（逼空燃料充足）" if squeeze else ""))
+        # entry timing gate (15m VWAP + 9/20 EMA) — best-effort, live fetch
+        try:
+            import timing as _timing
+            _mk = getattr(self.monitor, "market", "futures")
+            t = _timing.analyze(sym, market=_mk)
+            rg = _timing.regime(market=_mk)
+        except Exception:
+            t, rg = None, None
+        if t:
+            vd = t.get("vwap_dist")
+            vd_s = f"{vd*100:+.1f}%" if isinstance(vd, (int, float)) else "—"
+            rg_s = {"bullish": "多头", "bearish": "空头", "neutral": "中性"}.get(rg, "—")
+            gate = "就绪 ⚡（价>VWAP 且 EMA9>20）" if t.get("ready") else "未就绪 ✋"
+            warn = "（大盘逆风：新仓减半或推迟）" if rg == "bearish" else ""
+            lines.append(f"📍 点位（15m）：{gate} · 价 vs VWAP {vd_s} · "
+                         f"EMA{'多头' if t.get('ema_bull') else '空头'} · 大盘 BTC {rg_s}{warn}")
         lines.append("")
         lines.append(verdict)
         # tracker context if present
