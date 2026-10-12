@@ -22,6 +22,7 @@ Commands (slash or natural language):
 """
 import os, re, json, time, threading, traceback
 import urllib.request, urllib.error
+from datetime import datetime, timezone
 
 import ambush_tracker
 from memecoin_scanner import score_coin, fetch_funding_all, fetch_oi_change
@@ -58,6 +59,17 @@ def _split(s, n=3800):
 
 def _f(x):  # format a pct or '—'
     return f"{x*100:+.1f}%" if isinstance(x, (int, float)) else "—"
+
+
+def _age_days(ts_s):
+    """Days since an entry ts (ISO string). Naive timestamps are read as UTC."""
+    try:
+        t = datetime.fromisoformat(str(ts_s))
+        if t.tzinfo is None:
+            t = t.replace(tzinfo=timezone.utc)
+        return (datetime.now(timezone.utc) - t).days
+    except Exception:
+        return None
 
 
 class TelegramAgent:
@@ -294,10 +306,18 @@ class TelegramAgent:
         store = ambush_tracker.load()["entries"]
         open_w = [e for e in store if e["status"] == "waiting"]
         if open_w:
-            open_w.sort(key=lambda e: e.get("ts", ""), reverse=True)
-            lines.append("等待中最久的：")
+            coins = len({e["sym"] for e in open_w})
+            lines.append(f"（在途 {st['open_waiting']} 笔信号，涉及 {coins} 个币——同一横盘期可能有多笔）")
+            open_w.sort(key=lambda e: e.get("ts", ""))   # oldest first
+            lines.append("等待最久的（越接近 45 天窗越可能超时离场）：")
             for e in open_w[:5]:
-                lines.append(f"  {e['sym']} （{(e.get('ts') or '')[:10]} 入场）")
+                d = _age_days(e.get("ts"))
+                d_s = f"，已等 {d} 天" if isinstance(d, int) else ""
+                lines.append(f"  {e['sym']} （{(e.get('ts') or '')[:10]} 入场{d_s}）")
+            new_today = [e for e in open_w if _age_days(e.get("ts")) == 0]
+            if new_today:
+                lines.append(f"今天新增等待：{', '.join(sorted({e['sym'] for e in new_today})[:10])}"
+                             + ("…" if len({e['sym'] for e in new_today}) > 10 else ""))
         return "\n".join(lines)
 
     def ans_invalid(self, sym):
@@ -307,9 +327,11 @@ class TelegramAgent:
             open_w = [e for e in store if e["status"] == "waiting"]
             if not open_w:
                 return "当前没有在途（等待启动）的埋伏信号，谈不上失效。发 \"/check 币名\" 可实时判定单个币。"
-            lines = ["在途埋伏（都未失效，仍在 45 天等待窗内）："]
-            for e in sorted(open_w, key=lambda x: x.get("ts", ""), reverse=True)[:10]:
-                lines.append(f"  {e['sym']} {(e.get('ts') or '')[:10]} 入场")
+            lines = ["在途埋伏（都未失效，仍在 45 天等待窗内，按等待时长排序）："]
+            for e in sorted(open_w, key=lambda x: x.get("ts", ""))[:10]:
+                d = _age_days(e.get("ts"))
+                d_s = f"（已等 {d} 天）" if isinstance(d, int) else ""
+                lines.append(f"  {e['sym']} {(e.get('ts') or '')[:10]} 入场{d_s}")
             return "\n".join(lines)
         entries = [e for e in ambush_tracker.load()["entries"] if e["sym"] == sym]
         if not entries:

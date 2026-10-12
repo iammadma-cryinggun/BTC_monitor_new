@@ -38,7 +38,7 @@ POST_DAYS = 20          # days after launch to measure the peak
 PRE_FAIL = -0.20        # broke -20% before launching -> failed call
 WIN_STRONG, WIN, WEAK = 0.80, 0.30, 0.10
 REENTRY_COOLDOWN_D = 10  # min days between two ambush calls on the same coin
-STORE_LIMIT = 600
+STORE_LIMIT = 3000  # cap on stored entries (backfill full-history can exceed 1.5k)
 
 FINAL = ("win_strong", "win", "weak", "miss", "pre_fail", "timeout")
 STATUS_CN = {
@@ -343,7 +343,7 @@ def backfill(market="futures", quiet=False):
                 i += 12  # skip ~2 days to avoid overlapping calls on one coil
                 continue
             i += 1
-    store["entries"] = sorted(existing, key=lambda e: e.get("ts") or "")
+    store["entries"] = sorted(existing, key=lambda e: e.get("ts") or "")[-STORE_LIMIT:]
     save(store)
     if not quiet:
         print(f"[backfill] added {added} entries, total {len(store['entries'])}")
