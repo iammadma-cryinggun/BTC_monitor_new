@@ -4,8 +4,8 @@
 
 - **数据源**：Binance USD-M 合约公开行情 klines（只读、无需 API key、低权重，防封）
 - **检测逻辑**：`memecoin_playbook_scanner.detect` — 4h 六阶段（S1 横盘→S2 启动→S3 洗盘→S4 主升→S5 插针见顶→S6 崩盘+死猫反弹）+ 1h MA99 关键线
-- **信号**：🚀ENTER(启动) / 🔥AMBUSH(埋伏★) / 💧DIP(洗盘) / ⚠️TOP(见顶) / 🩸CRASH(崩盘) / ↩️BOUNCE(死猫反弹)
-- **呈现**：① Telegram 实时推送 ② 网页看板（同信号，实时刷新）
+- **信号**：🚀ENTER(启动) / 🔥AMBUSH(埋伏★) / 💧DIP(洗盘) / ⚠️TOP(见顶) / 📉MA25(放量破4h MA25，规则#6减半) / 🚪MA99(破4h MA99，规则#7全撤) / 🩸CRASH(崩盘) / ↩️BOUNCE(死猫反弹)
+- **呈现**：① Telegram 实时推送（状态转移即推，另有北京时间 8:00 每日摘要）② 网页看板（同信号，实时刷新；表格含 1h MA99 列，悬停显示具体价位）
 
 ---
 

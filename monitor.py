@@ -9,6 +9,8 @@
         💧 DIP     S3 洗盘 -> 可低吸
         🔥 AMBUSH  横盘蓄力 + 量能抬头 -> 加入埋伏观察，等启动
         ⚠️ TOP     4h 插针见顶 -> 至少减一半
+        📉 MA25    放量跌破 4h MA25 -> 再减一半 (规则#6)
+        🚪 MA99    跌破 4h MA99 -> 全部离场 (规则#7)
         🩸 CRASH   崩盘 -> 别接刀
         ↩️ BOUNCE  崩后巨量反弹 -> 阶段6不是底，别追
   - 每天本地 digest_hour 点推送「当日埋伏观察列表」(哪些币值得盯)
@@ -40,8 +42,9 @@ STATE_PATH = os.path.join(HERE, "data", "monitor_state.json")
 DIGEST_PATH = os.path.join(HERE, "data", "daily_digest.html")
 DATA = os.path.join(HERE, "data")
 
-SIG_EMOJI = {"ENTER": "🚀", "DIP": "💧", "AMBUSH": "🔥", "TOP": "⚠️", "CRASH": "🩸", "BOUNCE": "↩️"}
-SIG_ORDER = ["ENTER", "AMBUSH", "DIP", "TOP", "CRASH", "BOUNCE"]
+SIG_EMOJI = {"ENTER": "🚀", "DIP": "💧", "AMBUSH": "🔥", "TOP": "⚠️",
+             "MA25": "📉", "MA99": "🚪", "CRASH": "🩸", "BOUNCE": "↩️"}
+SIG_ORDER = ["ENTER", "AMBUSH", "DIP", "TOP", "MA25", "MA99", "CRASH", "BOUNCE"]
 
 DEFAULT_CONFIG = {
     "market": "futures",
@@ -110,6 +113,14 @@ def classify(sym, rec, prev):
             signals.append(("TOP",
                 f"{sym} 4h 出现长上影插针（{note}）。\n"
                 f"至少减一半仓位，跌破 MA99 全撤。", e))
+        elif t == "MA25_BREAK":
+            signals.append(("MA25",
+                f"{sym} 放量跌破 4h MA25（{note}）。\n"
+                f"剧本规则#6：再减一半仓位。", e))
+        elif t == "MA99_BREAK":
+            signals.append(("MA99",
+                f"{sym} 跌破 4h MA99（{note}）。\n"
+                f"剧本规则#7：全部离场。", e))
         elif t == "CRASH":
             signals.append(("CRASH",
                 f"{sym} 崩盘（{note}）。别接刀，等重新横盘。", e))
@@ -348,15 +359,22 @@ class Monitor:
                 star = "★" if r.get("vol_tick") else " "
                 pv = r.get("pv")
                 pv_s = f"{pv*100:+.0f}%" if pv is not None else "n/a"
+                m1 = r.get("ma99_1h")
+                pv1 = (r["price"] / m1 - 1.0) if (isinstance(m1, (int, float)) and m1 > 0) else None
+                pv1_s = f"{pv1*100:+.1f}%" if pv1 is not None else "—"
                 lines.append(f"  {star} {r['sym']:<12} 分{r['score']:.0f}  价{r['price']:.6g}  "
-                             f"区间{r['range_w']*100:.1f}%  量能{'抬头' if r.get('vol_tick') else '静'}  vsMA99 {pv_s}")
+                             f"区间{r['range_w']*100:.1f}%  量能{'抬头' if r.get('vol_tick') else '静'}  "
+                             f"vsMA99 {pv_s}  1hM99 {pv1_s}")
         else:
             lines.append("  （暂无）")
         lines.append("")
         lines.append("⚡ 近期启动（做 S3→S4）:")
         if fresh:
             for r in fresh:
-                lines.append(f"  {r['sym']:<12} S{r['stage'][-1]}  价{r['price']:.6g}  {r['reason']}")
+                m1 = r.get("ma99_1h")
+                pv1 = (r["price"] / m1 - 1.0) if (isinstance(m1, (int, float)) and m1 > 0) else None
+                pv1_s = f"1hM99 {pv1*100:+.1f}%  " if pv1 is not None else ""
+                lines.append(f"  {r['sym']:<12} S{r['stage'][-1]}  价{r['price']:.6g}  {pv1_s}{r['reason']}")
         else:
             lines.append("  （暂无）")
         if launched:

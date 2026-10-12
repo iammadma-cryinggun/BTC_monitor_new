@@ -39,6 +39,12 @@ BOUNCE_VOL   = 2.0    # S6 death-bounce: volume spike on rebound
 # guard suppressed the real top when a minor wick fired first.
 SHAKE_COOL   = 12     # ~2 days between SHAKEOUT events
 WICK_COOL    = 10     # ~40h between WICKTOP events
+# playbook exit rules #6/#7: first volume-boosted break below 4h MA25 -> halve
+# the position; break below 4h MA99 -> exit all. Only armed while in_play
+# (they are position-management signals for the active cycle, not noise while
+# the coin is still consolidating in S1 below its MAs).
+MA25_BREAK_VOL = 1.3  # vol_ratio must exceed this for the MA25 break to count
+MA_COOL      = 30     # ~5 days between MA-break events (once per cycle)
 # markup reset: an S4 that has gone quiet may only re-baseline to S1 when the
 # cycle is OLD and the markup has FADED well off its peak. A shallow, quiet
 # platform near the highs (BTW pre-top flat, dd<10%) is a continuation platform
@@ -77,6 +83,7 @@ def detect(df4h, df1h=None):
     consol = df["in_consol"].values
     stage = np.array(["S1"] * n, dtype=object)
     events = []  # {type, i, ts, price, note}
+    ma25v = df["ma25"].values; ma99v = df["ma99"].values
     in_play = False; launch_idx = None; peak = 0.0; launch_vol = 0.0; launch_price = 0.0
     phase = "idle"; bounced = False
     for i in range(1, n):
@@ -96,6 +103,24 @@ def detect(df4h, df1h=None):
                                    note=f"vol_ratio={volr[i]:.1f}x breakout"))
                 continue
         else:
+            # playbook exit rules #6/#7 — checked on every in-play bar so the
+            # discipline signals fire on the bar they happen, but WITHOUT
+            # `continue`: the phase logic below must still label this bar.
+            if not np.isnan(ma25v[i-1]) and not np.isnan(ma25v[i]) \
+                    and close[i-1] >= ma25v[i-1] and close[i] < ma25v[i] \
+                    and volr[i] > MA25_BREAK_VOL \
+                    and not any(e["type"] == "MA25_BREAK" and e["i"] > launch_idx
+                                and i - e["i"] < MA_COOL for e in events):
+                events.append(dict(type="MA25_BREAK", i=i, ts=str(df["ts"].iloc[i]),
+                                   price=round(float(close[i]), 6),
+                                   note=f"close {close[i]:.6g} broke 4h MA25 {ma25v[i]:.6g} on vol_ratio={volr[i]:.1f}x"))
+            if not np.isnan(ma99v[i-1]) and not np.isnan(ma99v[i]) \
+                    and close[i-1] >= ma99v[i-1] and close[i] < ma99v[i] \
+                    and not any(e["type"] == "MA99_BREAK" and e["i"] > launch_idx
+                                and i - e["i"] < MA_COOL for e in events):
+                events.append(dict(type="MA99_BREAK", i=i, ts=str(df["ts"].iloc[i]),
+                                   price=round(float(close[i]), 6),
+                                   note=f"close {close[i]:.6g} broke 4h MA99 {ma99v[i]:.6g}"))
             if phase != "crash" and SHAKE_LO <= dd <= SHAKE_HI and phase != "shakeout":
                 phase = "shakeout"; stage[i] = "S3"
                 # cooldown guard: allow repeated shakeouts (BTW-style 深针 every
