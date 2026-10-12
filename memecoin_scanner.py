@@ -150,12 +150,86 @@ def fetch_klines(sym, interval, limit, market="spot"):
                 last_err = Exception("empty klines")
                 continue
             rows = [dict(ts_ms=int(k[0]), open=float(k[1]), high=float(k[2]),
-                         low=float(k[3]), close=float(k[4]), volume=float(k[5])) for k in raw]
+                         low=float(k[3]), close=float(k[4]), volume=float(k[5]),
+                         tbuy=(float(k[9]) if len(k) > 9 and k[9] not in (None, "") else 0.0))
+                    for k in raw]
             return pd.DataFrame(rows)
         except (http.client.IncompleteRead, urllib.error.URLError, Exception) as e:
             last_err = e
             time.sleep(0.3)
     raise last_err
+
+# ----------------------------------------------------------------------------
+# Derivatives context (OI / funding) — the "what is the house doing" radar.
+# ----------------------------------------------------------------------------
+FUNDING_HOSTS = [
+    "https://fapi.binance.com/fapi/v1/premiumIndex",
+    "https://fapi1.binance.com/fapi/v1/premiumIndex",
+    "https://fapi2.binance.com/fapi/v1/premiumIndex",
+]
+OI_HIST_HOSTS = [
+    "https://fapi.binance.com/futures/data/openInterestHist",
+    "https://fapi1.binance.com/futures/data/openInterestHist",
+    "https://fapi2.binance.com/futures/data/openInterestHist",
+]
+
+def fetch_funding_all():
+    """ONE bulk call -> {SYMBOL: lastFundingRate} for every USD-M perp.
+
+    premiumIndex without a symbol param returns the whole board, so attaching
+    the current funding rate to all ~500 coins costs a single request per scan.
+    Returns {} on failure (callers treat missing as 'no data').
+    """
+    import urllib.request, urllib.error, http.client
+    opener = _proxy_opener()
+    for host in FUNDING_HOSTS:
+        try:
+            req = urllib.request.Request(host, headers=UA)
+            with opener.open(req, timeout=12) as resp:
+                raw = json.loads(resp.read())
+            out = {}
+            for d in raw:
+                sym = d.get("symbol", "")
+                if sym.endswith("USDT"):
+                    try:
+                        out[sym] = float(d["lastFundingRate"])
+                    except (KeyError, TypeError, ValueError):
+                        pass
+            if out:
+                return out
+        except Exception:
+            time.sleep(0.3)
+    return {}
+
+def fetch_oi_change(sym):
+    """24h open-interest change (fraction) from the 4h OI history.
+
+    OI up = positions piling in (fuel / accumulation); OI down after a pump =
+    covering / distribution. None on failure or thin history.
+    """
+    import urllib.request, urllib.error, http.client
+    opener = _proxy_opener()
+    for host in OI_HIST_HOSTS:
+        try:
+            url = f"{host}?symbol={sym}&period=4h&limit=42"
+            req = urllib.request.Request(url, headers=UA)
+            with opener.open(req, timeout=10) as resp:
+                raw = json.loads(resp.read())
+            if not raw or len(raw) < 8:
+                return None
+            ois = []
+            for r in raw:
+                try:
+                    ois.append(float(r["sumOpenInterest"]))
+                except (KeyError, TypeError, ValueError):
+                    return None
+            base = ois[-7] if len(ois) >= 7 else ois[0]   # ~24h ago (6 bars back)
+            if base <= 0:
+                return None
+            return ois[-1] / base - 1.0
+        except Exception:
+            time.sleep(0.2)
+    return None
 
 def get_universe(market="spot"):
     """All TRADING USDT pairs on Binance (spot or futures perpetuals).
@@ -329,6 +403,25 @@ def score_coin(sym, market="spot", force_fetch=False):
     # ~1 day move from 4h (last 6 bars)
     day_move = (close[-1] / close[-7] - 1.0) if n >= 7 else 0.0
 
+    # CVD proxy from taker-buy volume (klines index 9). tbuy_ratio = share of
+    # recent volume that was AGGRESSIVE BUYING (>0.5 = buyers paying up, i.e.
+    # real hands / squeeze fuel, not passive distribution). cvd_7d is the
+    # 7-day cumulative delta normalized by volume (-1..+1). Old cached CSVs
+    # lack the tbuy column -> both None (shown as n/a).
+    tbuy_ratio = None; cvd_7d = None
+    if "tbuy" in df.columns and n >= 10:
+        try:
+            tb = df["tbuy"].values; vv = df["volume"].values
+            sv3 = float(np.sum(vv[-3:])); st3 = float(np.sum(tb[-3:]))
+            if sv3 > 0:
+                tbuy_ratio = st3 / sv3
+            w = min(42, n)
+            svw = float(np.sum(vv[-w:])); stw = float(np.sum(tb[-w:]))
+            if svw > 0:
+                cvd_7d = 2.0 * stw / svw - 1.0
+        except Exception:
+            pass
+
     # 20-day (120 4h bars) swing ratio — gates out stablecoins / tokenized stocks / dead coins
     win = close[-120:]
     swing = (float(np.max(win)) / float(np.min(win))) if len(win) and np.min(win) > 0 else 1.0
@@ -379,6 +472,8 @@ def score_coin(sym, market="spot", force_fetch=False):
         flat_run=flat_run, range_w=round(range_w, 4), vol_tick=vol_tick, swing=round(swing, 3),
         pv=(round(pv, 4) if pv is not None else None),
         launch_recency=launch_recency, day_move=round(day_move, 4),
+        tbuy_ratio=(round(tbuy_ratio, 3) if tbuy_ratio is not None else None),
+        cvd_7d=(round(cvd_7d, 3) if cvd_7d is not None else None),
         events=[{k: e[k] for k in ("type", "ts", "price", "note")} for e in events[-6:]],
         spark=spark,
         bars=int(n), range_start=str(df["ts"].iloc[0]), range_end=str(df["ts"].iloc[-1]),

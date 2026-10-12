@@ -33,7 +33,8 @@ from datetime import datetime, timezone, timedelta
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
-from memecoin_scanner import score_coin, FUTURES_UNIVERSE, get_universe  # reuse detection
+from memecoin_scanner import (score_coin, FUTURES_UNIVERSE, get_universe,
+                              fetch_funding_all, fetch_oi_change)  # reuse detection
 from notifier import Notifier
 import dashboard
 from dashboard import DashboardServer, append_signal, load_signals, write_dashboard
@@ -102,8 +103,13 @@ def classify(sym, rec, prev):
         t = e["type"]
         note = e.get("note", "")
         if t == "LAUNCH":
+            tbr = rec.get("tbuy_ratio")
+            cvd_s = ""
+            if isinstance(tbr, (int, float)):
+                cvd_s = (f"\n主动买占比 {tbr*100:.0f}%（CVD口径：真实买盘"
+                         f"{'强' if tbr >= 0.55 else '一般'}）")
             signals.append(("ENTER",
-                f"{sym} 新启动 (S2)：横盘后第一根巨量突破（{note}）。\n"
+                f"{sym} 新启动 (S2)：横盘后第一根巨量突破（{note}）。{cvd_s}\n"
                 f"按剧本进观察列表，等待 S3 洗盘后做 S3→S4 主升。", e))
         elif t == "SHAKEOUT":
             signals.append(("DIP",
@@ -125,18 +131,35 @@ def classify(sym, rec, prev):
             signals.append(("CRASH",
                 f"{sym} 崩盘（{note}）。别接刀，等重新横盘。", e))
         elif t == "DEATHBOUNCE":
+            fd = rec.get("funding")
+            fd_s = ""
+            if isinstance(fd, (int, float)) and fd <= -0.001:
+                fd_s = f"\n当前资金费率 {fd*100:+.3f}%（空头挤爆在付钱）—— 剧本：极端负费率不是底。"
             signals.append(("BOUNCE",
-                f"{sym} 崩后巨量反弹（{note}）。这是阶段6，不是底，别追。", e))
+                f"{sym} 崩后巨量反弹（{note}）。这是阶段6，不是底，别追。{fd_s}", e))
     # 埋伏★：COILING + 量能刚抬头（且之前不是这个状态）
     ambush_now = (rec["label"] == "COILING" and rec.get("vol_tick"))
     ambush_prev = bool(prev and prev.get("label") == "COILING" and prev.get("vol_tick"))
     if ambush_now and not ambush_prev:
         pv = rec.get("pv")
         pv_s = f"{pv*100:+.0f}%" if pv is not None else "n/a"
+        # derivatives context: negative funding + rising OI while coiling =
+        # shorts paying up while positions pile in -> squeeze fuel if it launches
+        fd = rec.get("funding"); oc = rec.get("oi_chg_24h")
+        dv = []
+        if isinstance(fd, (int, float)):
+            dv.append(f"资金费率 {fd*100:+.3f}%")
+        if isinstance(oc, (int, float)):
+            dv.append(f"OI 24h {oc*100:+.0f}%")
+        dv_s = ""
+        if dv:
+            dv_s = "\n" + "·".join(dv)
+            if isinstance(fd, (int, float)) and fd < 0 and isinstance(oc, (int, float)) and oc > 0.10:
+                dv_s += "（空头付费+仓位堆积，若启动则逼空燃料充足）"
         signals.append(("AMBUSH",
             f"{sym} 埋伏★：横盘蓄力中量能抬头。\n"
             f"横盘 {rec.get('flat_run')} 根 4h，区间 {rec.get('range_w',0)*100:.1f}% 宽，"
-            f"价 vs 4h MA99 = {pv_s}。\n加入观察列表，等第一根巨量突破再动手。", None))
+            f"价 vs 4h MA99 = {pv_s}。{dv_s}\n加入观察列表，等第一根巨量突破再动手。", None))
     return signals, cur_sigs
 
 
@@ -260,6 +283,18 @@ class Monitor:
         n_ok = 0
         skip_reasons = {}
         offline = os.environ.get("MONITOR_OFFLINE") == "1"
+        # derivatives context: one bulk call funds every coin; OI history is
+        # per-coin so it is budgeted to the labels that actually trade on it
+        funding_map = {}
+        if not offline:
+            try:
+                funding_map = fetch_funding_all()
+                if funding_map:
+                    print(f"[deriv] funding: {len(funding_map)} symbols (bulk premiumIndex)")
+            except Exception as e:
+                print(f"[deriv] funding fetch failed: {e}")
+        oi_budget = [80]   # max per-coin OI history calls per scan
+        OI_LABELS = ("COILING", "FRESH_LAUNCH", "LAUNCHED")
         for sym in self.universe:
             try:
                 rec, err = score_coin(sym, market=self.market, force_fetch=not offline)
@@ -285,6 +320,20 @@ class Monitor:
                 print(f"  skip {sym}: {err}  [{reason}]")
                 continue
             n_ok += 1
+            # attach derivatives context BEFORE classify so signal messages
+            # can quote it (funding = retail sentiment; OI = positioning)
+            f = funding_map.get(sym) if funding_map else None
+            if f is not None:
+                rec["funding"] = f
+            if rec["label"] in OI_LABELS and oi_budget[0] > 0:
+                oi_budget[0] -= 1
+                try:
+                    oc = fetch_oi_change(sym)
+                    if oc is not None:
+                        rec["oi_chg_24h"] = round(oc, 4)
+                        time.sleep(0.1)
+                except Exception:
+                    pass
             ranked.append(rec)
             prev = state.get(sym)
             signals, cur_sigs = classify(sym, rec, prev)
@@ -383,9 +432,16 @@ class Monitor:
                 m1 = r.get("ma99_1h")
                 pv1 = (r["price"] / m1 - 1.0) if (isinstance(m1, (int, float)) and m1 > 0) else None
                 pv1_s = f"{pv1*100:+.1f}%" if pv1 is not None else "—"
+                fd = r.get("funding"); oc = r.get("oi_chg_24h")
+                dv = []
+                if isinstance(fd, (int, float)):
+                    dv.append(f"费率{fd*100:+.3f}%")
+                if isinstance(oc, (int, float)):
+                    dv.append(f"OI{oc*100:+.0f}%")
+                dv_s = ("  " + "·".join(dv)) if dv else ""
                 lines.append(f"  {star} {r['sym']:<12} 分{r['score']:.0f}  价{r['price']:.6g}  "
                              f"区间{r['range_w']*100:.1f}%  量能{'抬头' if r.get('vol_tick') else '静'}  "
-                             f"vsMA99 {pv_s}  1hM99 {pv1_s}")
+                             f"vsMA99 {pv_s}  1hM99 {pv1_s}{dv_s}")
         else:
             lines.append("  （暂无）")
         lines.append("")

@@ -261,8 +261,8 @@ def build_dashboard_html(ranked, signals, meta=None):
     others_disp = others[:150] if capped else others
     ordered = watch + others_disp
 
-    watch_rows = "".join(_row(r) for r in watch) or '<tr><td colspan="10" class="rs">（暂无埋伏候选）</td></tr>'
-    full_rows = "".join(_row(r) for r in ordered) or '<tr><td colspan="10" class="rs">（无数据）</td></tr>'
+    watch_rows = "".join(_row(r) for r in watch) or '<tr><td colspan="11" class="rs">（暂无埋伏候选）</td></tr>'
+    full_rows = "".join(_row(r) for r in ordered) or '<tr><td colspan="11" class="rs">（无数据）</td></tr>'
 
     sig_rows = ""
     for s in signals[-30:][::-1]:
@@ -336,14 +336,14 @@ th{{color:var(--mut);font-weight:600;position:sticky;top:0;background:var(--card
 
 <div class="card">
   <div class="h2">🔥 埋伏观察列表（横盘蓄力 / 刚启动，盯紧第一根巨量突破）</div>
-  <table><tr><th>币种</th><th>标签</th><th>阶段</th><th>分</th><th>现价</th><th>vsMA99</th><th>1hMA99</th><th>~1日</th><th>4h走势</th><th>依据</th></tr>
+  <table><tr><th>币种</th><th>标签</th><th>阶段</th><th>分</th><th>现价</th><th>vsMA99</th><th>1hMA99</th><th>OI·费率</th><th>~1日</th><th>4h走势</th><th>依据</th></tr>
   {watch_rows}
   </table>
 </div>
 
 <div class="card">
   <div class="h2">📊 全量监控（按埋伏分排序，显示前 {len(ordered)} / 共 {n_coins}）</div>
-  <table><tr><th>币种</th><th>标签</th><th>阶段</th><th>分</th><th>现价</th><th>vsMA99</th><th>1hMA99</th><th>~1日</th><th>4h走势</th><th>依据</th></tr>
+  <table><tr><th>币种</th><th>标签</th><th>阶段</th><th>分</th><th>现价</th><th>vsMA99</th><th>1hMA99</th><th>OI·费率</th><th>~1日</th><th>4h走势</th><th>依据</th></tr>
   {full_rows}
   </table>
   {('<div class="note">已按埋伏分截断显示前 150 行；全部 {0} 个币均已扫描，完整数据见 <code>data/monitor_state.json</code>。</div>'.format(len(others))) if capped else ''}
@@ -373,6 +373,20 @@ setTimeout(function(){{ location.reload(); }}, 30000);
 </body></html>"""
     return html
 
+def _deriv_cell(r):
+    """Compact 'OI·费率' cell, e.g. 'OI+18%·费率-0.021%'. Hover shows raw values."""
+    oc = r.get("oi_chg_24h"); fd = r.get("funding")
+    parts = []
+    if isinstance(oc, (int, float)):
+        parts.append(f"OI{oc*100:+.0f}%")
+    if isinstance(fd, (int, float)):
+        parts.append(f"费率{fd*100:+.3f}%")
+    if not parts:
+        return '<td class="rs">—</td>'
+    t_oi = f"OI 24h {oc*100:+.1f}%" if isinstance(oc, (int, float)) else "OI 24h n/a"
+    t_fd = f"资金费率 {fd*100:+.4f}%" if isinstance(fd, (int, float)) else "资金费率 n/a"
+    return f'<td class="rs" title="{t_oi} · {t_fd}">{"·".join(parts)}</td>'
+
 def _row(r):
     c = LAB_COLOR.get(r.get("label"), "#9ca3af")
     tag = _disp_label(r)
@@ -391,7 +405,7 @@ def _row(r):
             f'<td>S{(r.get("stage") or "?")[-1]}</td>'
             f'<td class="sc">{r.get("score",0):.0f}</td>'
             f'<td>{r.get("price"):.6g}</td>'
-            f'<td>{pv_s}</td><td{m1_title}>{pv1_s}</td><td>{dm_s}</td>'
+            f'<td>{pv_s}</td><td{m1_title}>{pv1_s}</td>{_deriv_cell(r)}<td>{dm_s}</td>'
             f'<td>{spark}</td>'
             f'<td class="rs">{reason}</td></tr>')
 
@@ -431,12 +445,12 @@ th{color:var(--mut);font-weight:600;position:sticky;top:0;background:var(--card)
 </div>
 <div class="card">
   <div class="h2">🔥 埋伏观察列表（横盘蓄力 / 刚启动，盯紧第一根巨量突破）</div>
-  <table><tr><th>币种</th><th>标签</th><th>阶段</th><th>分</th><th>现价</th><th>vsMA99</th><th>1hMA99</th><th>~1日</th><th>4h走势</th><th>依据</th></tr>
+  <table><tr><th>币种</th><th>标签</th><th>阶段</th><th>分</th><th>现价</th><th>vsMA99</th><th>1hMA99</th><th>OI·费率</th><th>~1日</th><th>4h走势</th><th>依据</th></tr>
   <tbody id="watch"></tbody></table>
 </div>
 <div class="card">
   <div class="h2" id="fullh2">📊 全量监控</div>
-  <table><tr><th>币种</th><th>标签</th><th>阶段</th><th>分</th><th>现价</th><th>vsMA99</th><th>1hMA99</th><th>~1日</th><th>4h走势</th><th>依据</th></tr>
+  <table><tr><th>币种</th><th>标签</th><th>阶段</th><th>分</th><th>现价</th><th>vsMA99</th><th>1hMA99</th><th>OI·费率</th><th>~1日</th><th>4h走势</th><th>依据</th></tr>
   <tbody id="full"></tbody></table>
   <div id="fullnote" class="note"></div>
 </div>
@@ -475,6 +489,10 @@ function row(r){
   var rs=(r.reason||"").replace(/\\n/g," ");
   var sc=(r.score!=null)?Math.round(r.score):0;
   var m1=r.ma99_1h, pv1=(m1&&m1>0&&r.price)?(r.price/m1-1):null;
+  var dv=[];
+  if(typeof r.oi_chg_24h==="number") dv.push("OI"+fmtPct(r.oi_chg_24h));
+  if(typeof r.funding==="number") dv.push("费率"+(r.funding*100).toFixed(3)+"%");
+  var dcell=dv.length?('<td class="rs">'+dv.join("·")+"</td>"):'<td class="rs">—</td>';
   return '<tr><td class="sym">'+(r.sym||"")+'</td>'+
     '<td><span class="tag" style="background:'+c+'">'+tag+'</span></td>'+
     '<td>S'+((r.stage||"?").toString().slice(-1))+'</td>'+
@@ -482,6 +500,7 @@ function row(r){
     '<td>'+fmtPrice(r.price)+'</td>'+
     '<td>'+fmtPct(r.pv)+'</td>'+
     '<td title="'+(m1?("1h MA99 = "+fmtPrice(m1)):"")+'">'+fmtPct(pv1)+'</td>'+
+    dcell+
     '<td>'+fmtPct(r.day_move)+'</td>'+
     '<td>'+spark(r.spark)+'</td>'+
     '<td class="rs">'+rs+'</td></tr>';
@@ -538,8 +557,8 @@ function render(d){
   var others=ranked.filter(function(r){return r.label!=="COILING"&&r.label!=="FRESH_LAUNCH";});
   others.sort(function(a,b){return (b.score||0)-(a.score||0);});
   var capped=others.length>150, disp=watch.concat(others.slice(0,150));
-  document.getElementById("watch").innerHTML = watch.map(row).join("") || '<tr><td colspan="10" class="rs">（暂无埋伏候选）</td></tr>';
-  document.getElementById("full").innerHTML = disp.map(row).join("") || '<tr><td colspan="10" class="rs">（无数据）</td></tr>';
+  document.getElementById("watch").innerHTML = watch.map(row).join("") || '<tr><td colspan="11" class="rs">（暂无埋伏候选）</td></tr>';
+  document.getElementById("full").innerHTML = disp.map(row).join("") || '<tr><td colspan="11" class="rs">（无数据）</td></tr>';
   document.getElementById("fullh2").textContent = "📊 全量监控（按埋伏分排序，显示前 "+disp.length+" / 共 "+rok+"）";
   document.getElementById("fullnote").innerHTML = capped ? ("已按埋伏分截断显示前 150 行；全部 "+others.length+" 个币均已扫描，完整数据见 data/monitor_state.json。") : "";
   // signals
