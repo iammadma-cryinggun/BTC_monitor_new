@@ -270,15 +270,15 @@ def build_dashboard_html(ranked, signals, meta=None):
                 + ' ｜ 跳过多为 symbol 已被下架/不在该市场，或瞬时被限流（下一轮缓存命中即可恢复）</div>')
 
     watch = [r for r in ranked if r.get("label") in ("COILING", "COILING_LITE", "FRESH_LAUNCH")]
-    watch.sort(key=lambda r: -r.get("score", 0))
+    watch.sort(key=lambda r: -r.get("potential", r.get("score", 0)))
     others = [r for r in ranked if r.get("label") not in ("COILING", "COILING_LITE", "FRESH_LAUNCH")]
     others.sort(key=lambda r: -r.get("score", 0))
     capped = len(others) > 150
     others_disp = others[:150] if capped else others
     ordered = watch + others_disp
 
-    watch_rows = "".join(_row(r) for r in watch) or '<tr><td colspan="11" class="rs">（暂无埋伏候选）</td></tr>'
-    full_rows = "".join(_row(r) for r in ordered) or '<tr><td colspan="11" class="rs">（无数据）</td></tr>'
+    watch_rows = "".join(_row(r) for r in watch) or '<tr><td colspan="12" class="rs">（暂无埋伏候选）</td></tr>'
+    full_rows = "".join(_row(r) for r in ordered) or '<tr><td colspan="12" class="rs">（无数据）</td></tr>'
 
     sig_rows = ""
     for s in signals[-30:][::-1]:
@@ -353,14 +353,14 @@ th{{color:var(--mut);font-weight:600;position:sticky;top:0;background:var(--card
 
 <div class="card">
   <div class="h2">🔥 埋伏观察列表（横盘蓄力 / 刚启动，盯紧第一根巨量突破；⚡=15m点位就绪：价>VWAP且EMA9>20，✋=未就绪）</div>
-  <table><tr><th>币种</th><th>标签</th><th>阶段</th><th>分</th><th>现价</th><th>vsMA99</th><th>1hMA99</th><th>OI·费率</th><th>~1日</th><th>4h走势</th><th>依据</th></tr>
+  <table><tr><th>币种</th><th>标签</th><th>阶段</th><th>分</th><th>潜力</th><th>现价</th><th>vsMA99</th><th>1hMA99</th><th>OI·费率</th><th>~1日</th><th>4h走势</th><th>依据</th></tr>
   {watch_rows}
   </table>
 </div>
 
 <div class="card">
   <div class="h2">📊 全量监控（按埋伏分排序，显示前 {len(ordered)} / 共 {n_coins}）</div>
-  <table><tr><th>币种</th><th>标签</th><th>阶段</th><th>分</th><th>现价</th><th>vsMA99</th><th>1hMA99</th><th>OI·费率</th><th>~1日</th><th>4h走势</th><th>依据</th></tr>
+  <table><tr><th>币种</th><th>标签</th><th>阶段</th><th>分</th><th>潜力</th><th>现价</th><th>vsMA99</th><th>1hMA99</th><th>OI·费率</th><th>~1日</th><th>4h走势</th><th>依据</th></tr>
   {full_rows}
   </table>
   {('<div class="note">已按埋伏分截断显示前 150 行；全部 {0} 个币均已扫描，完整数据见 <code>data/monitor_state.json</code>。</div>'.format(len(others))) if capped else ''}
@@ -404,6 +404,18 @@ def _deriv_cell(r):
     t_fd = f"资金费率 {fd*100:+.4f}%" if isinstance(fd, (int, float)) else "资金费率 n/a"
     return f'<td class="rs" title="{t_oi} · {t_fd}">{"·".join(parts)}</td>'
 
+def _pot_cell(r):
+    """Potential cell: bold gold >=75, green >=60, muted otherwise."""
+    pot = r.get("potential")
+    if not isinstance(pot, (int, float)):
+        return '<td class="rs">—</td>'
+    color = "#f59e0b" if pot >= 75 else ("#4ade80" if pot >= 60 else "var(--mut)")
+    t = (f"潜力 = 弹性(swing {((r.get('swing') or 1)*100):.0f}%) × 蓄力({r.get('flat_run')}根) "
+         f"× 收紧(区间{(r.get('range_w') or 0)*100:.0f}%) × 低位(vsMA99) × 资金流 × 逼空燃料"
+         " —— 若启动能走多远；分 = 信号质量。")
+    return f'<td class="sc" style="color:{color};font-size:13px" title="{t}">{pot:.0f}</td>'
+
+
 def _row(r):
     c = LAB_COLOR.get(r.get("label"), "#9ca3af")
     tag = _disp_label(r)
@@ -421,6 +433,7 @@ def _row(r):
             f'<td><span class="tag" style="background:{c}">{tag}</span></td>'
             f'<td>S{(r.get("stage") or "?")[-1]}</td>'
             f'<td class="sc">{r.get("score",0):.0f}</td>'
+            f'{_pot_cell(r)}'
             f'<td>{r.get("price"):.6g}</td>'
             f'<td>{pv_s}</td><td{m1_title}>{pv1_s}</td>{_deriv_cell(r)}<td>{dm_s}</td>'
             f'<td>{spark}</td>'
@@ -462,12 +475,12 @@ th{color:var(--mut);font-weight:600;position:sticky;top:0;background:var(--card)
 </div>
 <div class="card">
   <div class="h2">🔥 埋伏观察列表（横盘蓄力 / 刚启动，盯紧第一根巨量突破；⚡=15m点位就绪：价>VWAP且EMA9>20，✋=未就绪）</div>
-  <table><tr><th>币种</th><th>标签</th><th>阶段</th><th>分</th><th>现价</th><th>vsMA99</th><th>1hMA99</th><th>OI·费率</th><th>~1日</th><th>4h走势</th><th>依据</th></tr>
+  <table><tr><th>币种</th><th>标签</th><th>阶段</th><th>分</th><th>潜力</th><th>现价</th><th>vsMA99</th><th>1hMA99</th><th>OI·费率</th><th>~1日</th><th>4h走势</th><th>依据</th></tr>
   <tbody id="watch"></tbody></table>
 </div>
 <div class="card">
   <div class="h2" id="fullh2">📊 全量监控</div>
-  <table><tr><th>币种</th><th>标签</th><th>阶段</th><th>分</th><th>现价</th><th>vsMA99</th><th>1hMA99</th><th>OI·费率</th><th>~1日</th><th>4h走势</th><th>依据</th></tr>
+  <table><tr><th>币种</th><th>标签</th><th>阶段</th><th>分</th><th>潜力</th><th>现价</th><th>vsMA99</th><th>1hMA99</th><th>OI·费率</th><th>~1日</th><th>4h走势</th><th>依据</th></tr>
   <tbody id="full"></tbody></table>
   <div id="fullnote" class="note"></div>
 </div>
@@ -509,6 +522,12 @@ function spark(vals){
   var pts=vals.map(function(v,i){ return (i/(vals.length-1)*w).toFixed(1)+","+(h-((v-mn)/rng)*h).toFixed(1); }).join(" ");
   return '<svg width="'+w+'" height="'+h+'"><polyline points="'+pts+'" fill="none" stroke="#3b82f6" stroke-width="1.4"/></svg>';
 }
+function potCell(r){
+  var p=r.potential;
+  if(typeof p!=="number") return '<td class="rs">—</td>';
+  var c=p>=75?"#f59e0b":(p>=60?"#4ade80":"#9ca3af");
+  return '<td class="sc" style="color:'+c+';font-size:13px">'+Math.round(p)+'</td>';
+}
 function row(r){
   var c=LAB[r.label]||"#9ca3af", tag=dispLabel(r);
   var rs=(r.reason||"").replace(/\\n/g," ");
@@ -522,6 +541,7 @@ function row(r){
     '<td><span class="tag" style="background:'+c+'">'+tag+'</span></td>'+
     '<td>S'+((r.stage||"?").toString().slice(-1))+'</td>'+
     '<td class="sc">'+sc+'</td>'+
+    potCell(r)+
     '<td>'+fmtPrice(r.price)+'</td>'+
     '<td>'+fmtPct(r.pv)+'</td>'+
     '<td title="'+(m1?("1h MA99 = "+fmtPrice(m1)):"")+'">'+fmtPct(pv1)+'</td>'+
@@ -579,12 +599,12 @@ function render(d){
   document.getElementById("health").innerHTML = h;
   // tables
   var watch=ranked.filter(function(r){return r.label==="COILING"||r.label==="COILING_LITE"||r.label==="FRESH_LAUNCH";});
-  watch.sort(function(a,b){return (b.score||0)-(a.score||0);});
+  watch.sort(function(a,b){return ((b.potential!=null?b.potential:(b.score||0))-(a.potential!=null?a.potential:(a.score||0)));});
   var others=ranked.filter(function(r){return r.label!=="COILING"&&r.label!=="COILING_LITE"&&r.label!=="FRESH_LAUNCH";});
   others.sort(function(a,b){return (b.score||0)-(a.score||0);});
   var capped=others.length>150, disp=watch.concat(others.slice(0,150));
-  document.getElementById("watch").innerHTML = watch.map(row).join("") || '<tr><td colspan="11" class="rs">（暂无埋伏候选）</td></tr>';
-  document.getElementById("full").innerHTML = disp.map(row).join("") || '<tr><td colspan="11" class="rs">（无数据）</td></tr>';
+  document.getElementById("watch").innerHTML = watch.map(row).join("") || '<tr><td colspan="12" class="rs">（暂无埋伏候选）</td></tr>';
+  document.getElementById("full").innerHTML = disp.map(row).join("") || '<tr><td colspan="12" class="rs">（无数据）</td></tr>';
   document.getElementById("fullh2").textContent = "📊 全量监控（按埋伏分排序，显示前 "+disp.length+" / 共 "+rok+"）";
   document.getElementById("fullnote").innerHTML = capped ? ("已按埋伏分截断显示前 150 行；全部 "+others.length+" 个币均已扫描，完整数据见 data/monitor_state.json。") : "";
   // signals

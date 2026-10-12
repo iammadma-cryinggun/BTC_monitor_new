@@ -369,6 +369,63 @@ def load_or_fetch(sym, interval, limit, market="spot", force_fetch=False):
     df.to_csv(path, index=False)
     return df
 
+def potential_of(rec):
+    """Upside-potential score (0-100) for a coil candidate.
+
+    score answers "how textbook is the coil" (signal quality); potential
+    answers "IF it fires, how big can it get" (elasticity x fuel), which
+    is what should drive WHICH candidates get watched / badged / sized:
+
+      elasticity 0-30 : 20d swing — last cycle's 妖性 repeats (beta)
+      duration   0-20 : flat_run — stored energy (0.35/bar, ~57 bars caps)
+      tightness  0-15 : narrow range = sellers exhausted (30% wide -> 0)
+      low-entry  0-15 : price hugging/below MA99 = not pre-pumped
+      flow      0-12 : taker-buy share >= 0.55 (+6) + 7d CVD > 0 (+6)
+      squeeze    0-8 : negative funding (+4) + OI 24h > +10% (+4)
+                        (funding/OI are attached by the monitor AFTER the
+                        scan — pass an enriched rec to get these points)
+      LITE tier x0.8  : big caps simply move less
+
+    Not a prediction — a ranking heuristic. The ambush tracker's per-bucket
+    peak_gain stats are the calibration loop that will tune these weights.
+    """
+    swing = rec.get("swing") or 1.0
+    flat = rec.get("flat_run") or 0
+    range_w = rec.get("range_w")
+    pv = rec.get("pv")
+    tbr = rec.get("tbuy_ratio")
+    cvd = rec.get("cvd_7d")
+    fd = rec.get("funding")
+    oc = rec.get("oi_chg_24h")
+
+    p = 0.0
+    p += min(30.0, max(0.0, (swing - 1.12) * 10.0))   # swing 4.1+ -> 30
+    p += min(20.0, flat * 0.35)                         # ~57 bars -> 20
+    if isinstance(range_w, (int, float)):
+        p += max(0.0, 15.0 * (1.0 - range_w / 0.30))    # 15% wide -> 7.5
+    if pv is None:
+        p += 5.0
+    elif pv <= -0.35:
+        p += 5.0                                       # too deep, may be dead
+    elif pv <= 0.05:
+        p += 15.0                                      # ideal grinding zone
+    elif pv <= 0.45:
+        p += 15.0 - (pv - 0.05) / 0.40 * 13.0
+    else:
+        p += 2.0                                       # already stretched
+    if isinstance(tbr, (int, float)) and tbr >= 0.55:
+        p += 6.0
+    if isinstance(cvd, (int, float)) and cvd > 0.0:
+        p += 6.0
+    if isinstance(fd, (int, float)) and fd < 0:
+        p += 4.0
+    if isinstance(oc, (int, float)) and oc > 0.10:
+        p += 4.0
+    if rec.get("label") == "COILING_LITE":
+        p *= 0.8
+    return round(min(100.0, p), 1)
+
+
 def score_coin(sym, market="spot", force_fetch=False):
     try:
         df4h = load_or_fetch(sym, "4h", 400, market=market, force_fetch=force_fetch)
@@ -490,8 +547,12 @@ def score_coin(sym, market="spot", force_fetch=False):
             label, score, reason = "LOW_VOL", 0, f"dead-flat / low-vol (20d swing {swing:.0%}) - skip"
 
     spark = [round(float(x), 6) for x in close[-120:]]
+    # base potential (no funding/OI yet — the monitor recomputes after enrich)
+    _pot_src = dict(sym=sym, label=label, swing=swing, flat_run=flat_run,
+                    range_w=range_w, pv=pv, tbuy_ratio=tbuy_ratio, cvd_7d=cvd_7d)
     return dict(
         sym=sym, label=label, stage=s, score=round(score, 1), reason=reason,
+        potential=potential_of(_pot_src),
         price=levels["price"],
         ma25_4h=levels["ma25_4h"], ma99_4h=ma99,
         ma99_1h=levels["ma99_1h"],

@@ -36,7 +36,8 @@ from datetime import datetime, timezone, timedelta
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 from memecoin_scanner import (score_coin, FUTURES_UNIVERSE, get_universe,
-                              fetch_funding_all, fetch_oi_change)  # reuse detection
+                              fetch_funding_all, fetch_oi_change,
+                              potential_of)  # reuse detection
 from notifier import Notifier
 import dashboard
 from dashboard import DashboardServer, append_signal, load_signals, write_dashboard
@@ -408,6 +409,10 @@ class Monitor:
                         time.sleep(0.1)
                 except Exception:
                     pass
+            # recompute potential now that funding/OI are attached (squeeze
+            # bonus only counts with derivatives context present)
+            if rec["label"] in ("COILING", "COILING_LITE"):
+                rec["potential"] = potential_of(rec)
             ranked.append(rec)
             prev = state.get(sym)
             signals, cur_sigs = classify(sym, rec, prev,
@@ -424,14 +429,18 @@ class Monitor:
                 for lvl, msg, ev in signals:
                     new_signals.append((lvl, sym, msg, ev))
             time.sleep(self.request_sleep)
-        # entry-timing badges for the watchlist top slice (15m VWAP/EMA gate):
-        # one extra 15m kline call per coin, capped at 12, so dashboards and
-        # the Telegram agent can show ⚡/✋ without refetching
+        # entry-timing badges for the watchlist (15m VWAP/EMA gate):
+        # coverage is ALL main-tier COILING + FRESH_LAUNCH (the actionable set),
+        # then LITE by *potential* (not score — potential = elasticity x fuel,
+        # which is what decides who's worth a 15m watch), capped at 24 total
+        # 15m kline calls per scan.
         try:
             import timing
-            watch_top = sorted(
-                [r for r in ranked if r.get("label") in ("COILING", "COILING_LITE", "FRESH_LAUNCH")],
-                key=lambda r: -r.get("score", 0))[:12]
+            mains = [r for r in ranked if r.get("label") in ("COILING", "FRESH_LAUNCH")]
+            lites = sorted([r for r in ranked if r.get("label") == "COILING_LITE"],
+                           key=lambda r: -r.get("potential", r.get("score", 0)))
+            cap = 24
+            watch_top = mains + lites[:max(0, cap - len(mains))]
             for r in watch_top:
                 t = timing.analyze(r["sym"], market=self.market)
                 if t:
@@ -495,7 +504,8 @@ class Monitor:
     # ---- daily digest ----
     def run_digest(self):
         ranked = self.last_ranked or self.run_scan(emit=False) or []
-        coiling = sorted([r for r in ranked if r["label"] == "COILING"], key=lambda r: -r["score"])
+        coiling = sorted([r for r in ranked if r["label"] == "COILING"],
+                         key=lambda r: -r.get("potential", r.get("score", 0)))
         # Sort the secondary sub-lists by *relevance*, not by symbol (the universe
         # is alphabetically sorted, so an unsorted slice makes every list look
         # artificially clustered by prefix -- e.g. all "1000xxx" or all "A...").
@@ -545,7 +555,7 @@ class Monitor:
                 if isinstance(oc, (int, float)):
                     dv.append(f"OI{oc*100:+.0f}%")
                 dv_s = ("  " + "·".join(dv)) if dv else ""
-                lines.append(f"  {star}{tmk} {r['sym']:<12} 分{r['score']:.0f}  价{r['price']:.6g}  "
+                lines.append(f"  {star}{tmk} {r['sym']:<12} 潜力{r.get('potential',0):.0f} 分{r['score']:.0f}  价{r['price']:.6g}  "
                              f"区间{r['range_w']*100:.1f}%  量能{'抬头' if r.get('vol_tick') else '静'}  "
                              f"vsMA99 {pv_s}  1hM99 {pv1_s}{dv_s}")
             lines.append("  （⚡=15m 点位就绪：价>VWAP 且 EMA9>20；✋=未就绪。只盯 ⚡ 打仓位）")
@@ -554,7 +564,7 @@ class Monitor:
         lines.append("")
         # secondary tier: fresh-cycle large caps (below the 妖币 amplitude gate)
         lite = sorted([r for r in ranked if r["label"] == "COILING_LITE"],
-                      key=lambda r: -r["score"])
+                      key=lambda r: -r.get("potential", r.get("score", 0)))
         lines.append("🔵 次级蓄力（大盘币新周期横盘，仓位小于主档；振幅未达妖币门槛）:")
         if lite:
             for r in lite[:5]:
@@ -568,7 +578,7 @@ class Monitor:
                 if isinstance(oc, (int, float)):
                     dv.append(f"OI{oc*100:+.0f}%")
                 dv_s = ("  " + "·".join(dv)) if dv else ""
-                lines.append(f"  {star} {r['sym']:<12} 分{r['score']:.0f}  价{r['price']:.6g}  "
+                lines.append(f"  {star} {r['sym']:<12} 潜力{r.get('potential',0):.0f} 分{r['score']:.0f}  价{r['price']:.6g}  "
                              f"横盘{r.get('flat_run')}根  区间{r['range_w']*100:.1f}%  "
                              f"振幅{r.get('swing',0)*100:.0f}%  vsMA99 {pv_s}{dv_s}")
         else:

@@ -235,15 +235,15 @@ class TelegramAgent:
     def ans_ambush(self):
         rk = [r for r in (self.monitor.last_ranked or [])
               if r.get("label") == "COILING"]
-        rk.sort(key=lambda r: -r.get("score", 0))
+        rk.sort(key=lambda r: -r.get("potential", r.get("score", 0)))
         lite = [r for r in (self.monitor.last_ranked or [])
                 if r.get("label") == "COILING_LITE"]
-        lite.sort(key=lambda r: -r.get("score", 0))
+        lite.sort(key=lambda r: -r.get("potential", r.get("score", 0)))
         if not rk and not lite:
             return "当前没有 COILING（横盘蓄力）币。"
         lines = []
         if rk:
-            lines.append(f"🔥 埋伏观察列表（{len(rk)} 个，按分排序，前 12）：")
+            lines.append(f"🔥 埋伏观察列表（{len(rk)} 个，按潜力排序，前 12）：")
             for r in rk[:12]:
                 star = "★" if r.get("vol_tick") else " "
                 tm = r.get("timing") or {}
@@ -257,16 +257,17 @@ class TelegramAgent:
                 dv_s = ("·" + "·".join(dv)) if dv else ""
                 m1 = r.get("ma99_1h")
                 pv1 = (r["price"] / m1 - 1.0) if (isinstance(m1, (int, float)) and m1 > 0) else None
-                lines.append(f" {star}{tmk} {r['sym']:<13} 分{r['score']:.0f} 价{r['price']:.6g} "
+                lines.append(f" {star}{tmk} {r['sym']:<13} 潜力{r.get('potential',0):.0f} 分{r['score']:.0f} 价{r['price']:.6g} "
                              f"vsMA99 {_f(r.get('pv'))} 1hM99 {_f(pv1)}{dv_s}")
             lines.append("★=量能抬头 · ⚡=15m 点位就绪（价>VWAP 且 EMA9>20）· ✋=未就绪。"
+                         "潜力=弹性×蓄力×燃料（若启动能走多远），分=信号质量（横盘多像剧本）。"
                          "只盯 ⚡ 打仓位。完整列表看网页看板。")
         if lite:
             lines.append("")
-            lines.append(f"🔵 次级蓄力（{len(lite)} 个，大盘币新周期横盘，仓位小于主档）：")
+            lines.append(f"🔵 次级蓄力（{len(lite)} 个，大盘币新周期横盘，按潜力前 6，仓位小于主档）：")
             for r in lite[:6]:
                 star = "★" if r.get("vol_tick") else " "
-                lines.append(f" {star} {r['sym']:<13} 分{r['score']:.0f} 价{r['price']:.6g} "
+                lines.append(f" {star} {r['sym']:<13} 潜力{r.get('potential',0):.0f} 分{r['score']:.0f} 价{r['price']:.6g} "
                              f"横盘{r.get('flat_run')}根 vsMA99 {_f(r.get('pv'))} "
                              f"振幅{(r.get('swing') or 0)*100:.0f}%")
         return "\n".join(lines)
@@ -406,6 +407,14 @@ class TelegramAgent:
                else "COILING_LITE_VOL_TICK" if (label == "COILING_LITE" and vt)
                else label)
         verdict = verdicts.get(key, f"当前标签 {label} / 阶段 {rec.get('stage')}。")
+        try:
+            from memecoin_scanner import potential_of
+            if label in ("COILING", "COILING_LITE"):
+                rec["potential"] = potential_of(rec)
+        except Exception:
+            pass
+        pot = rec.get("potential")
+        pot_s = f" · 潜力 {pot:.0f}" if isinstance(pot, (int, float)) else ""
         m1 = rec.get("ma99_1h")
         pv1 = (rec["price"] / m1 - 1.0) if (isinstance(m1, (int, float)) and m1 > 0 and rec.get("price")) else None
         fd, oc = rec.get("funding"), rec.get("oi_chg_24h")
@@ -416,7 +425,7 @@ class TelegramAgent:
             dv.append(f"OI 24h {oc*100:+.0f}%")
         lines = [
             f"🔎 {sym} 实时判定" + ("（离线数据，可能陈旧）" if stale else ""),
-            f"阶段 {rec.get('stage')} · 标签 {rec.get('label')} · 分 {rec.get('score', 0):.0f}",
+            f"阶段 {rec.get('stage')} · 标签 {rec.get('label')} · 分 {rec.get('score', 0):.0f}{pot_s}",
             f"价 {rec.get('price'):.6g} · vsMA99 {_f(rec.get('pv'))} · 1hM99 {_f(pv1)}",
             rec.get("reason") or "",
         ]
