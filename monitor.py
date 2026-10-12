@@ -591,6 +591,16 @@ class Monitor:
             self._purge_test_signals()
         except Exception as e:
             print(f"[startup] purge skipped: {e}")
+        # Telegram Q&A agent (rule-based, read-only): ask the monitor questions
+        # directly — /status /ambush /track /check, or "BANKUSDT 还能埋伏吗"
+        try:
+            from telegram_agent import TelegramAgent
+            if (self.notifier.channel == "telegram" and self.notifier.bot_token
+                    and self.notifier.chat_id):
+                self.agent = TelegramAgent(self.notifier, self)
+                self.agent.start()
+        except Exception as e:
+            print(f"[tg-agent] disabled: {e}")
         # write an initial dashboard immediately so the page shows pool size at once
         # (now seeded with last good data if available, instead of 0/empty)
         try:
