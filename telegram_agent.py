@@ -78,8 +78,16 @@ class TelegramAgent:
         payload = json.dumps(params).encode()
         req = urllib.request.Request(url, data=payload,
                                      headers={"Content-Type": "application/json"})
-        with urllib.request.urlopen(req, timeout=40) as r:
-            return json.loads(r.read())
+        try:
+            with urllib.request.urlopen(req, timeout=40) as r:
+                return json.loads(r.read())
+        except urllib.error.HTTPError as e:
+            # surface Telegram's own error text (e.g. 409 Conflict)
+            try:
+                body = e.read().decode("utf-8", "replace")
+            except Exception:
+                body = ""
+            raise RuntimeError(f"telegram {method} HTTP {e.code}: {body}") from e
 
     def _reply(self, text):
         # plain text, no parse_mode: symbols/percent signs go out verbatim
@@ -91,6 +99,13 @@ class TelegramAgent:
         if not (self.token and self.chat_id):
             print("[tg-agent] disabled: no telegram token/chat_id")
             return
+        # a stale webhook would make every getUpdates fail with 409 —
+        # clear it defensively (no-op when none is set)
+        try:
+            r = self._api("deleteWebhook", drop_pending_updates=False)
+            print(f"[tg-agent] deleteWebhook: {r.get('ok')} {r.get('description', '')}")
+        except Exception as e:
+            print(f"[tg-agent] deleteWebhook failed: {e}")
         self.thread = threading.Thread(target=self._run, daemon=True, name="tg-agent")
         self.thread.start()
 
@@ -98,9 +113,11 @@ class TelegramAgent:
         print("[tg-agent] polling started")
         while not getattr(self.monitor, "stop", False):
             try:
-                upd = self._api("getUpdates", offset=self.offset, timeout=25,
+                res = self._api("getUpdates", offset=self.offset, timeout=25,
                                 allowed_updates=["message"])
-                for u in upd:
+                if not res.get("ok"):
+                    raise RuntimeError(f"getUpdates not ok: {res}")
+                for u in (res.get("result") or []):  # .result — the dict itself is NOT the list
                     self.offset = max(self.offset, u["update_id"] + 1)
                     try:
                         self._handle(u.get("message") or {})
@@ -108,7 +125,10 @@ class TelegramAgent:
                         print("[tg-agent] handler error:")
                         traceback.print_exc()
             except Exception as e:
-                print(f"[tg-agent] poll retry: {e}")
+                hint = ""
+                if "409" in str(e):
+                    hint = "（409：有 webhook 或另一个 getUpdates 轮询在抢占这个 bot）"
+                print(f"[tg-agent] poll retry: {e} {hint}")
                 time.sleep(5)
         print("[tg-agent] stopped")
 
@@ -375,8 +395,39 @@ if __name__ == "__main__":
         universe, market, scan_interval, last_scan_iso = [], "futures", 120, "-"
         universe_source = "test"
     ag = TelegramAgent(FakeNotifier(), FakeMonitor())
-    for q in ["/help", "状态", "埋伏列表", "追踪", "BANKUSDT 还能埋伏吗",
+    # hermetic: stub the network calls ans_check would make (Binance is
+    # unreachable from some networks; the smoke must stay offline)
+    _real_score, _real_fund = score_coin, fetch_funding_all
+    score_coin = lambda sym, market=None, force_fetch=False: (
+        {"sym": sym, "label": "COILING", "stage": "S1", "score": 80,
+         "price": 0.001, "reason": "smoke", "pv": 0.10, "vol_tick": True}, None)
+    fetch_funding_all = lambda: {sym: -0.001}
+    for q in ["/help", "/HELP", "状态", "埋伏列表", "追踪", "BANKUSDT 还能埋伏吗",
               "BANKUSDT 信号失效了吗", "失效", "/check", "你好"]:
         r = ag.answer(q)
         print(f"--- {q!r} ->\n{r}\n" if r else f"--- {q!r} -> None\n")
+    score_coin, fetch_funding_all = _real_score, _real_fund
+    # regression test for the poll-loop bug: _api returns the FULL dict
+    # {"ok":..., "result":[...]}; iterating the dict itself yields keys and
+    # crashed with TypeError on u["update_id"] — updates were never handled.
+    import ambush_tracker as _at
+    _at.TRACK_PATH = "data/ambush_track_smoke.json"
+    seen = []
+    ag2 = TelegramAgent(FakeNotifier(), FakeMonitor())
+    FakeMonitor.stop = False  # let the poll loop enter; fake_api flips it back
+    def fake_api(method, **params):
+        if method == "getUpdates":
+            FakeMonitor.stop = True  # one iteration then exit
+            return {"ok": True, "result": [{
+                "update_id": 42,
+                "message": {"chat": {"id": 1}, "text": "/HELP"},
+            }]}
+        return {"ok": True}
+    def fake_handle(msg):
+        seen.append(msg.get("text"))
+    ag2._api = fake_api
+    ag2._handle = fake_handle
+    ag2._run()
+    assert seen == ["/HELP"], f"poll loop did not handle the update: {seen}"
+    print("poll-loop regression OK: update handled through full response dict")
     print("routing smoke OK")
