@@ -28,8 +28,11 @@ DATA_JSON_PATH = os.path.join(DATA, "dashboard_data.json")
 SIGNALS_PATH = os.path.join(DATA, "signals_log.json")
 
 # Build/version marker so the deployed container can be identified at a glance.
-# Sourced from git at import time; falls back to "dev" when .git is absent
-# (e.g. a build context that strips VCS, or a local run).
+# Resolution order:
+#   1. git rev-parse (local dev)
+#   2. ZEABUR_GIT_COMMIT_SHA env (injected by Zeabur at build time)
+#   3. build_version.txt (baked into the image by the Dockerfile)
+#   4. "dev" fallback
 def get_build_sha():
     try:
         import subprocess
@@ -39,6 +42,16 @@ def get_build_sha():
         sha = out.stdout.strip()
         if sha:
             return sha
+    except Exception:
+        pass
+    sha = (os.environ.get("ZEABUR_GIT_COMMIT_SHA") or "").strip()
+    if sha:
+        return sha[:7]
+    try:
+        with open(os.path.join(HERE, "build_version.txt"), encoding="utf-8") as f:
+            sha = f.read().strip()
+        if sha:
+            return sha[:7]
     except Exception:
         pass
     return "dev"
