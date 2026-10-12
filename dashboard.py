@@ -112,11 +112,13 @@ def _disp_label(r):
     lab = r.get("label")
     if lab == "COILING":
         return "🔥埋伏★" if r.get("vol_tick") else "观察"
+    if lab == "COILING_LITE":
+        return "🔵次级★" if r.get("vol_tick") else "次级蓄力"
     return {"FRESH_LAUNCH": "⚡刚启动", "LAUNCHED": "已启动", "PUMPED": "已拉完",
             "CRASHING": "崩盘中", "LOW_VOL": "低波动", "STABLE": "稳定币",
             "STOCK": "代币股", "UNKNOWN": "未知"}.get(lab, str(lab))
 
-LAB_COLOR = {"COILING": "#f59e0b", "FRESH_LAUNCH": "#22c55e", "LAUNCHED": "#0ea5e9",
+LAB_COLOR = {"COILING": "#f59e0b", "COILING_LITE": "#38bdf8", "FRESH_LAUNCH": "#22c55e", "LAUNCHED": "#0ea5e9",
              "PUMPED": "#ef4444", "CRASHING": "#6b7280", "LOW_VOL": "#4b5563",
              "STABLE": "#4b5563", "STOCK": "#4b5563", "UNKNOWN": "#9ca3af"}
 
@@ -127,6 +129,7 @@ def build_snapshot(ranked, signals, meta=None):
     ranked = ranked or []
     n_coins = len(ranked)
     n_amb = sum(1 for r in ranked if r.get("label") == "COILING" and r.get("vol_tick"))
+    n_lite = sum(1 for r in ranked if r.get("label") == "COILING_LITE")
     n_fresh = sum(1 for r in ranked if r.get("label") == "FRESH_LAUNCH")
     try:
         cutoff = time.time() - 86400
@@ -168,6 +171,7 @@ def build_snapshot(ranked, signals, meta=None):
             "attempted": attempted,
             "ranked_count": n_coins,
             "ambush": n_amb,
+            "ambush_lite": n_lite,
             "fresh": n_fresh,
             "sig24": n_sig24,
             "ranked_lag": ranked_lag,
@@ -232,6 +236,7 @@ def build_dashboard_html(ranked, signals, meta=None):
     ranked = ranked or []
     n_coins = len(ranked)
     n_amb = sum(1 for r in ranked if r.get("label") == "COILING" and r.get("vol_tick"))
+    n_lite = sum(1 for r in ranked if r.get("label") == "COILING_LITE")
     n_fresh = sum(1 for r in ranked if r.get("label") == "FRESH_LAUNCH")
     try:
         cutoff = time.time() - 86400
@@ -253,9 +258,9 @@ def build_dashboard_html(ranked, signals, meta=None):
                 + (f'（{rtxt}）' if rtxt else '')
                 + ' ｜ 跳过多为 symbol 已被下架/不在该市场，或瞬时被限流（下一轮缓存命中即可恢复）</div>')
 
-    watch = [r for r in ranked if r.get("label") in ("COILING", "FRESH_LAUNCH")]
+    watch = [r for r in ranked if r.get("label") in ("COILING", "COILING_LITE", "FRESH_LAUNCH")]
     watch.sort(key=lambda r: -r.get("score", 0))
-    others = [r for r in ranked if r.get("label") not in ("COILING", "FRESH_LAUNCH")]
+    others = [r for r in ranked if r.get("label") not in ("COILING", "COILING_LITE", "FRESH_LAUNCH")]
     others.sort(key=lambda r: -r.get("score", 0))
     capped = len(others) > 150
     others_disp = others[:150] if capped else others
@@ -326,6 +331,7 @@ th{{color:var(--mut);font-weight:600;position:sticky;top:0;background:var(--card
     <div class="kpi">监控币数 <b>{u_size}</b></div>
     <div class="kpi">本轮回测有效 <b style="color:{'#f87171' if (u_size and n_coins < u_size*0.5) else '#fff'}">{n_coins}</b></div>
     <div class="kpi">🔥埋伏★ <b style="color:#f59e0b">{n_amb}</b></div>
+    <div class="kpi">🔵次级蓄力 <b style="color:#38bdf8">{n_lite}</b></div>
     <div class="kpi">⚡刚启动 <b style="color:#22c55e">{n_fresh}</b></div>
     <div class="kpi">近24h信号 <b>{n_sig24}</b></div>
   </div>
@@ -470,9 +476,10 @@ th{color:var(--mut);font-weight:600;position:sticky;top:0;background:var(--card)
 <div class="note" style="margin-top:6px">看板构建版本: <b>__BUILD_SHA__</b>（若与最新 commit 不一致，说明 Zeabur 仍在运行旧容器，需手动 Redeploy）</div>
 <script>
 var NEXT = 0;
-var LAB = {COILING:"#f59e0b",FRESH_LAUNCH:"#22c55e",LAUNCHED:"#0ea5e9",PUMPED:"#ef4444",CRASHING:"#6b7280",LOW_VOL:"#4b5563",STABLE:"#4b5563",STOCK:"#4b5563",UNKNOWN:"#9ca3af"};
+var LAB = {COILING:"#f59e0b",COILING_LITE:"#38bdf8",FRESH_LAUNCH:"#22c55e",LAUNCHED:"#0ea5e9",PUMPED:"#ef4444",CRASHING:"#6b7280",LOW_VOL:"#4b5563",STABLE:"#4b5563",STOCK:"#4b5563",UNKNOWN:"#9ca3af"};
 function dispLabel(r){
   if(r.label==="COILING") return r.vol_tick?"🔥埋伏★":"观察";
+  if(r.label==="COILING_LITE") return r.vol_tick?"🔵次级★":"次级蓄力";
   var m={FRESH_LAUNCH:"⚡刚启动",LAUNCHED:"已启动",PUMPED:"已拉完",CRASHING:"崩盘中",LOW_VOL:"低波动",STABLE:"稳定币",STOCK:"代币股",UNKNOWN:"未知"};
   return m[r.label]||r.label;
 }
@@ -521,6 +528,7 @@ function render(d){
     '<div class="kpi">监控币数 <b>'+usz+'</b></div>'+
     '<div class="kpi">本轮回测有效 <b style="color:'+(broken?"#f87171":"#fff")+'">'+rok+'</b></div>'+
     '<div class="kpi">🔥埋伏★ <b style="color:#f59e0b">'+(k.ambush||0)+'</b></div>'+
+    '<div class="kpi">🔵次级蓄力 <b style="color:#38bdf8">'+(k.ambush_lite||0)+'</b></div>'+
     '<div class="kpi">⚡刚启动 <b style="color:#22c55e">'+(k.fresh||0)+'</b></div>'+
     '<div class="kpi">近24h信号 <b>'+(k.sig24||0)+'</b></div>';
   document.getElementById("scanline").textContent = "上次扫描："+meta.last_scan+" ｜ 距下次扫描："+
@@ -552,9 +560,9 @@ function render(d){
   }
   document.getElementById("health").innerHTML = h;
   // tables
-  var watch=ranked.filter(function(r){return r.label==="COILING"||r.label==="FRESH_LAUNCH";});
+  var watch=ranked.filter(function(r){return r.label==="COILING"||r.label==="COILING_LITE"||r.label==="FRESH_LAUNCH";});
   watch.sort(function(a,b){return (b.score||0)-(a.score||0);});
-  var others=ranked.filter(function(r){return r.label!=="COILING"&&r.label!=="FRESH_LAUNCH";});
+  var others=ranked.filter(function(r){return r.label!=="COILING"&&r.label!=="COILING_LITE"&&r.label!=="FRESH_LAUNCH";});
   others.sort(function(a,b){return (b.score||0)-(a.score||0);});
   var capped=others.length>150, disp=watch.concat(others.slice(0,150));
   document.getElementById("watch").innerHTML = watch.map(row).join("") || '<tr><td colspan="11" class="rs">（暂无埋伏候选）</td></tr>';

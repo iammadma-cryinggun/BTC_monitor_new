@@ -70,8 +70,10 @@ def save(store):
     os.replace(tmp, TRACK_PATH)
 
 
-def record_entry(rec, now=None, source="live", score=None):
-    """Called when an AMBUSH signal actually fires. rec = score_coin result."""
+def record_entry(rec, now=None, source="live", score=None, tier="main"):
+    """Called when an AMBUSH signal actually fires. rec = score_coin result.
+    tier: "main" (妖币横盘) | "lite" (次级蓄力，大盘币新周期) — tracked
+    separately so the self-learning loop can measure each tier's edge."""
     store = load()
     now = now or _now()
     sym = rec["sym"]
@@ -86,7 +88,7 @@ def record_entry(rec, now=None, source="live", score=None):
             if (now - ft).days < REENTRY_COOLDOWN_D:
                 return None
     entry = dict(
-        sym=sym, ts=now.isoformat(), source=source,
+        sym=sym, ts=now.isoformat(), source=source, tier=tier,
         entry_price=float(rec["price"]),
         score=(score if score is not None else rec.get("score")),
         flat_run=rec.get("flat_run"), range_w=rec.get("range_w"),
@@ -203,6 +205,20 @@ def stats(store=None):
         out["buckets"][name] = dict(
             n=len(b), launched_n=len(bl), launch_rate=_r(bl, b),
             avg_peak=round(sum(bg) / len(bg), 3) if bg else None)
+    # per-tier hit rates: main (妖币) vs lite (次级蓄力) — lets the data decide
+    # whether the lite tier earns its place. Old entries have no tier -> main.
+    def _tier(tier):
+        t_ent = [e for e in ent if e.get("tier", "main") == tier]
+        t_final = [e for e in final if e.get("tier", "main") == tier]
+        t_lf = [e for e in t_final if e["status"] in ("win_strong", "win", "weak", "miss")]
+        t30 = [e for e in t_lf if (e.get("peak_gain") or 0) >= WIN]
+        tg = [e["peak_gain"] for e in t_lf if e.get("peak_gain") is not None]
+        return dict(
+            total=len(t_ent), evaluated=len(t_final), launched_n=len(t_lf),
+            launch_rate=_r(t_lf, t_final), win30_rate=_r(t30, t_lf),
+            avg_peak=round(sum(tg) / len(tg), 3) if tg else None,
+            open_waiting=sum(1 for e in t_ent if e["status"] == "waiting"))
+    out["tiers"] = {"main": _tier("main"), "lite": _tier("lite")}
     return out
 
 

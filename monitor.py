@@ -8,6 +8,8 @@
         🚀 ENTER   新启动 (S2 第一根巨量突破)  -> 进观察列表做 S3->S4
         💧 DIP     S3 洗盘 -> 可低吸
         🔥 AMBUSH  横盘蓄力 + 量能抬头 -> 加入埋伏观察，等启动
+        🔵 AMBUSH_LITE 次级蓄力（大盘币新周期：横盘更久+贴MA99，20日振幅未达妖币门槛）
+                 -> 小仓位埋伏观察，等启动；追踪器按 tier=lite 分开统计胜率
         ⚠️ TOP     4h 插针见顶 -> 至少减一半
         📉 MA25    放量跌破 4h MA25 -> 再减一半 (规则#6)
         🚪 MA99    跌破 4h MA99 -> 全部离场 (规则#7)
@@ -44,8 +46,9 @@ DIGEST_PATH = os.path.join(HERE, "data", "daily_digest.html")
 DATA = os.path.join(HERE, "data")
 
 SIG_EMOJI = {"ENTER": "🚀", "DIP": "💧", "AMBUSH": "🔥", "TOP": "⚠️",
-             "MA25": "📉", "MA99": "🚪", "CRASH": "🩸", "BOUNCE": "↩️"}
-SIG_ORDER = ["ENTER", "AMBUSH", "DIP", "TOP", "MA25", "MA99", "CRASH", "BOUNCE"]
+             "MA25": "📉", "MA99": "🚪", "CRASH": "🩸", "BOUNCE": "↩️",
+             "AMBUSH_LITE": "🔵"}
+SIG_ORDER = ["ENTER", "AMBUSH", "AMBUSH_LITE", "DIP", "TOP", "MA25", "MA99", "CRASH", "BOUNCE"]
 
 DEFAULT_CONFIG = {
     "market": "futures",
@@ -160,6 +163,30 @@ def classify(sym, rec, prev):
             f"{sym} 埋伏★：横盘蓄力中量能抬头。\n"
             f"横盘 {rec.get('flat_run')} 根 4h，区间 {rec.get('range_w',0)*100:.1f}% 宽，"
             f"价 vs 4h MA99 = {pv_s}。{dv_s}\n加入观察列表，等第一根巨量突破再动手。", None))
+    # 次级蓄力★：COILING_LITE + 量能刚抬头（且之前不是这个状态）。
+    # 大盘币新周期形态：20 日振幅不够妖币门槛，用更久横盘 + 贴 MA99 补偿。
+    lite_now = (rec["label"] == "COILING_LITE" and rec.get("vol_tick"))
+    lite_prev = bool(prev and prev.get("label") == "COILING_LITE" and prev.get("vol_tick"))
+    if lite_now and not lite_prev:
+        pv = rec.get("pv")
+        pv_s = f"{pv*100:+.0f}%" if pv is not None else "n/a"
+        fd = rec.get("funding"); oc = rec.get("oi_chg_24h")
+        dv = []
+        if isinstance(fd, (int, float)):
+            dv.append(f"资金费率 {fd*100:+.3f}%")
+        if isinstance(oc, (int, float)):
+            dv.append(f"OI 24h {oc*100:+.0f}%")
+        dv_s = ""
+        if dv:
+            dv_s = "\n" + "·".join(dv)
+            if isinstance(fd, (int, float)) and fd < 0 and isinstance(oc, (int, float)) and oc > 0.10:
+                dv_s += "（空头付费+仓位堆积，若启动则逼空燃料充足）"
+        signals.append(("AMBUSH_LITE",
+            f"{sym} 次级蓄力★：大盘币新周期横盘，量能抬头。\n"
+            f"横盘 {rec.get('flat_run')} 根 4h（比主档更久），区间 {rec.get('range_w',0)*100:.1f}% 宽，"
+            f"20 日振幅 {rec.get('swing',0)*100:.0f}%（未达妖币门槛 130%），"
+            f"价 vs 4h MA99 = {pv_s}。{dv_s}\n"
+            f"可小仓位埋伏（小于主档），等第一根巨量突破加仓。追踪器按次级档分开算胜率。", None))
     return signals, cur_sigs
 
 
@@ -294,7 +321,7 @@ class Monitor:
             except Exception as e:
                 print(f"[deriv] funding fetch failed: {e}")
         oi_budget = [80]   # max per-coin OI history calls per scan
-        OI_LABELS = ("COILING", "FRESH_LAUNCH", "LAUNCHED")
+        OI_LABELS = ("COILING", "COILING_LITE", "FRESH_LAUNCH", "LAUNCHED")
         for sym in self.universe:
             try:
                 rec, err = score_coin(sym, market=self.market, force_fetch=not offline)
@@ -376,6 +403,10 @@ class Monitor:
                     rec = next((r for r in ranked if r["sym"] == sym), None)
                     if rec is not None:
                         ambush_tracker.record_entry(rec)
+                elif lvl == "AMBUSH_LITE":
+                    rec = next((r for r in ranked if r["sym"] == sym), None)
+                    if rec is not None:
+                        ambush_tracker.record_entry(rec, tier="lite")
             ambush_tracker.update(ranked)
         except Exception as e:
             print(f"[ambush-track] skipped: {e}")
@@ -421,7 +452,8 @@ class Monitor:
         # so do NOT repeat it here (would show twice on Telegram).
         lines = []
         src = getattr(self, "universe_source", "curated")
-        lines.append(f"监控池 {src} · 池大小 {len(self.universe)} · 本轮有效 {len(ranked)} 币 | 埋伏候选 {len(coiling)} | 刚启动 {len(fresh)}")
+        lines.append(f"监控池 {src} · 池大小 {len(self.universe)} · 本轮有效 {len(ranked)} 币 | "
+                     f"埋伏候选 {len(coiling)} | 次级 {sum(1 for r in ranked if r['label']=='COILING_LITE')} | 刚启动 {len(fresh)}")
         lines.append("")
         lines.append("🔥 埋伏观察列表（横盘蓄力，等第一根巨量启动）:")
         if coiling:
@@ -442,6 +474,28 @@ class Monitor:
                 lines.append(f"  {star} {r['sym']:<12} 分{r['score']:.0f}  价{r['price']:.6g}  "
                              f"区间{r['range_w']*100:.1f}%  量能{'抬头' if r.get('vol_tick') else '静'}  "
                              f"vsMA99 {pv_s}  1hM99 {pv1_s}{dv_s}")
+        else:
+            lines.append("  （暂无）")
+        lines.append("")
+        # secondary tier: fresh-cycle large caps (below the 妖币 amplitude gate)
+        lite = sorted([r for r in ranked if r["label"] == "COILING_LITE"],
+                      key=lambda r: -r["score"])
+        lines.append("🔵 次级蓄力（大盘币新周期横盘，仓位小于主档；振幅未达妖币门槛）:")
+        if lite:
+            for r in lite[:5]:
+                star = "★" if r.get("vol_tick") else " "
+                pv = r.get("pv")
+                pv_s = f"{pv*100:+.0f}%" if pv is not None else "n/a"
+                fd = r.get("funding"); oc = r.get("oi_chg_24h")
+                dv = []
+                if isinstance(fd, (int, float)):
+                    dv.append(f"费率{fd*100:+.3f}%")
+                if isinstance(oc, (int, float)):
+                    dv.append(f"OI{oc*100:+.0f}%")
+                dv_s = ("  " + "·".join(dv)) if dv else ""
+                lines.append(f"  {star} {r['sym']:<12} 分{r['score']:.0f}  价{r['price']:.6g}  "
+                             f"横盘{r.get('flat_run')}根  区间{r['range_w']*100:.1f}%  "
+                             f"振幅{r.get('swing',0)*100:.0f}%  vsMA99 {pv_s}{dv_s}")
         else:
             lines.append("  （暂无）")
         lines.append("")

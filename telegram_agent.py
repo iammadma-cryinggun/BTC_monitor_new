@@ -224,23 +224,36 @@ class TelegramAgent:
         rk = [r for r in (self.monitor.last_ranked or [])
               if r.get("label") == "COILING"]
         rk.sort(key=lambda r: -r.get("score", 0))
-        if not rk:
+        lite = [r for r in (self.monitor.last_ranked or [])
+                if r.get("label") == "COILING_LITE"]
+        lite.sort(key=lambda r: -r.get("score", 0))
+        if not rk and not lite:
             return "当前没有 COILING（横盘蓄力）币。"
-        lines = [f"🔥 埋伏观察列表（{len(rk)} 个，按分排序，前 12）："]
-        for r in rk[:12]:
-            star = "★" if r.get("vol_tick") else " "
-            fd, oc = r.get("funding"), r.get("oi_chg_24h")
-            dv = []
-            if isinstance(fd, (int, float)):
-                dv.append(f"费率{fd*100:+.3f}%")
-            if isinstance(oc, (int, float)):
-                dv.append(f"OI{oc*100:+.0f}%")
-            dv_s = ("·" + "·".join(dv)) if dv else ""
-            m1 = r.get("ma99_1h")
-            pv1 = (r["price"] / m1 - 1.0) if (isinstance(m1, (int, float)) and m1 > 0) else None
-            lines.append(f" {star} {r['sym']:<13} 分{r['score']:.0f} 价{r['price']:.6g} "
-                         f"vsMA99 {_f(r.get('pv'))} 1hM99 {_f(pv1)}{dv_s}")
-        lines.append("★=量能抬头（埋伏★条件）。完整列表看网页看板。")
+        lines = []
+        if rk:
+            lines.append(f"🔥 埋伏观察列表（{len(rk)} 个，按分排序，前 12）：")
+            for r in rk[:12]:
+                star = "★" if r.get("vol_tick") else " "
+                fd, oc = r.get("funding"), r.get("oi_chg_24h")
+                dv = []
+                if isinstance(fd, (int, float)):
+                    dv.append(f"费率{fd*100:+.3f}%")
+                if isinstance(oc, (int, float)):
+                    dv.append(f"OI{oc*100:+.0f}%")
+                dv_s = ("·" + "·".join(dv)) if dv else ""
+                m1 = r.get("ma99_1h")
+                pv1 = (r["price"] / m1 - 1.0) if (isinstance(m1, (int, float)) and m1 > 0) else None
+                lines.append(f" {star} {r['sym']:<13} 分{r['score']:.0f} 价{r['price']:.6g} "
+                             f"vsMA99 {_f(r.get('pv'))} 1hM99 {_f(pv1)}{dv_s}")
+            lines.append("★=量能抬头（埋伏★条件）。完整列表看网页看板。")
+        if lite:
+            lines.append("")
+            lines.append(f"🔵 次级蓄力（{len(lite)} 个，大盘币新周期横盘，仓位小于主档）：")
+            for r in lite[:6]:
+                star = "★" if r.get("vol_tick") else " "
+                lines.append(f" {star} {r['sym']:<13} 分{r['score']:.0f} 价{r['price']:.6g} "
+                             f"横盘{r.get('flat_run')}根 vsMA99 {_f(r.get('pv'))} "
+                             f"振幅{(r.get('swing') or 0)*100:.0f}%")
         return "\n".join(lines)
 
     def ans_track(self, sym=None):
@@ -270,6 +283,13 @@ class TelegramAgent:
             w3 = f"{st['win30_rate']:.0%}" if st["win30_rate"] is not None else "—"
             ap = f"{st['avg_peak']:+.0%}" if st["avg_peak"] is not None else "—"
             lines.append(f"已结算 {st['evaluated']}：启动率 {lr} · 启动后+30%达标率 {w3} · 平均峰值 {ap}")
+        tiers = st.get("tiers") or {}
+        lt = tiers.get("lite") or {}
+        if lt.get("total"):
+            l_lr = f"{lt['launch_rate']:.0%}" if lt.get("launch_rate") is not None else "—"
+            l_w3 = f"{lt['win30_rate']:.0%}" if lt.get("win30_rate") is not None else "—"
+            lines.append(f"其中次级档（lite）：{lt['total']} 笔 · 已结算 {lt.get('evaluated', 0)} · "
+                         f"启动率 {l_lr} · +30%达标率 {l_w3}")
         lines.append(f"在途：等待启动 {st['open_waiting']} · 已启动跟踪 {st['open_launched']}")
         store = ambush_tracker.load()["entries"]
         open_w = [e for e in store if e["status"] == "waiting"]
@@ -346,6 +366,8 @@ class TelegramAgent:
         verdicts = {
             "COILING_VOL_TICK": "✅ 可以埋伏：横盘蓄力 + 量能抬头（埋伏★条件满足）。等第一根巨量突破再动手。",
             "COILING": "🟡 可观察但未触发：在横盘，但量能还没抬头（非埋伏★）。把它放进观察列表等量变。",
+            "COILING_LITE_VOL_TICK": "✅ 次级埋伏：大盘币新周期横盘 + 量能抬头（次级★）。振幅未达妖币门槛，仓位应小于主档。等巨量突破。",
+            "COILING_LITE": "🔵 次级蓄力可观察：大盘币新周期横盘（振幅未达妖币门槛），量能还没抬头。小仓位观察，等量变。",
             "FRESH_LAUNCH": "🚀 埋伏窗口已过：已启动（S2）。剧本动作是等 S3 洗盘 30-60% 低吸，做 S3→S4。",
             "LAUNCHED": "👀 已启动且动能可能衰减（>8根4h）。关注是否再洗盘，别追高。",
             "PUMPED": "⚠️ 不可埋伏：已在主升/顶部段（S4/S5）。剧本：太晚/高危，等下一轮。",
@@ -354,7 +376,10 @@ class TelegramAgent:
             "STABLE": "⚪ 稳定币，非标的。",
             "STOCK": "⚪ 代币化股票，非标的。",
         }
-        key = "COILING_VOL_TICK" if (label == "COILING" and rec.get("vol_tick")) else label
+        vt = bool(rec.get("vol_tick"))
+        key = ("COILING_VOL_TICK" if (label == "COILING" and vt)
+               else "COILING_LITE_VOL_TICK" if (label == "COILING_LITE" and vt)
+               else label)
         verdict = verdicts.get(key, f"当前标签 {label} / 阶段 {rec.get('stage')}。")
         m1 = rec.get("ma99_1h")
         pv1 = (rec["price"] / m1 - 1.0) if (isinstance(m1, (int, float)) and m1 > 0 and rec.get("price")) else None

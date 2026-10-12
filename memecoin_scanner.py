@@ -62,6 +62,16 @@ STOCK_SET = {"GOOGL","MSFT","ASML","TSLA","BABA","AMZN","NVDA","AMD","META","NFL
              "UHS","DVA","EBAY","EBA","VRSK","EXPD","CHRW","JBHT","LSTR","ODFL","SAIA",
              "XPO","GXO","FWRD"}
 SWING_GATE = 1.30   # 20-day max/min ratio must exceed this to be a real move candidate
+# --- secondary tier: coiling large-caps in a FRESH cycle (never 妖过) ---
+# main tier requires swing >= 1.30 (a prior pump/dump inside 20d). Coins below
+# that gate used to be LOW_VOL. COILING_LITE catches "W/STRK-style" big caps
+# grinding at lows: amplitude is NOT enough, so coil quality must compensate
+# (longer run, tighter range, glued to MA99) and the score is capped below
+# the main tier so it can never outrank a real 妖币 candidate.
+LITE_GATE = 1.12        # 20d swing must at least reach this (12%)
+LITE_MIN_FLAT = 20      # must coil >= 20 4h bars (~3.3 days), stricter than main tier
+LITE_MAX_RANGE = 0.25   # last-15-bar range <= 25%
+LITE_PV_WINDOW = (-0.25, 0.15)  # price vs MA99: hugging/below it (grinding at lows)
 
 # curated Binance USD-M FUTURES meme / low-cap perpetual universe
 FUTURES_UNIVERSE = [
@@ -447,9 +457,7 @@ def score_coin(sym, market="spot", force_fetch=False):
             label, score = "LAUNCHED", 38
             reason = f"launched {launch_recency} bars ago; momentum may be fading"
     elif s == "S1":
-        if swing < SWING_GATE:
-            label, score, reason = "LOW_VOL", 0, f"dead-flat / low-vol (20d swing {swing:.0%}) - skip"
-        else:
+        if swing >= SWING_GATE:
             label = "COILING"
             score = 35
             score += min(22, flat_run * 1.6)                 # longer coil = better
@@ -462,6 +470,24 @@ def score_coin(sym, market="spot", force_fetch=False):
             reason = (f"coiling {flat_run} bars, range {range_w*100:.1f}% wide, "
                       f"vol_tick={vol_tick}, 20d swing {swing:.0%}, price vs MA99={pv*100:+.0f}%" if pv is not None
                       else f"coiling {flat_run} bars, range {range_w*100:.1f}% wide, vol_tick={vol_tick}")
+        elif (swing >= LITE_GATE and flat_run >= LITE_MIN_FLAT
+              and range_w <= LITE_MAX_RANGE and pv is not None
+              and LITE_PV_WINDOW[0] <= pv <= LITE_PV_WINDOW[1]):
+            # secondary tier: amplitude below the 妖币 gate, so require MORE
+            # coil quality and cap the score below every main-tier candidate
+            label = "COILING_LITE"
+            score = 25
+            score += min(18, flat_run * 1.2)                 # longer grind = better
+            score += min(12.0, max(0.0, (tightness - 0.80)) * 120)
+            if vol_tick:
+                score += 20                                  # 次级埋伏★
+            score += 8                                       # near MA99 is REQUIRED here
+            score = min(78, score)
+            reason = (f"lite coiling {flat_run} bars, range {range_w*100:.1f}% wide, "
+                      f"vol_tick={vol_tick}, 20d swing {swing:.0%} (below main gate), "
+                      f"price vs MA99={pv*100:+.0f}%")
+        else:
+            label, score, reason = "LOW_VOL", 0, f"dead-flat / low-vol (20d swing {swing:.0%}) - skip"
 
     spark = [round(float(x), 6) for x in close[-120:]]
     return dict(
@@ -494,9 +520,9 @@ def run(universe, market="spot"):
               f"price={rec['price']:.6g}  {rec['reason']}")
         time.sleep(0.12)
     # rank
-    actionable = [r for r in out if r["label"] in ("COILING", "FRESH_LAUNCH")]
+    actionable = [r for r in out if r["label"] in ("COILING", "COILING_LITE", "FRESH_LAUNCH")]
     actionable.sort(key=lambda r: r["score"], reverse=True)
-    others = [r for r in out if r["label"] not in ("COILING", "FRESH_LAUNCH")]
+    others = [r for r in out if r["label"] not in ("COILING", "COILING_LITE", "FRESH_LAUNCH")]
     others.sort(key=lambda r: r["score"], reverse=True)
     return actionable + others, out, skipped
 
@@ -515,10 +541,12 @@ def build_html(ranked, skipped, top_n, market="spot"):
     def disp_label(r):
         if r["label"] == "COILING":
             return ("埋伏★" if r.get("vol_tick") else "观察")
+        if r["label"] == "COILING_LITE":
+            return ("次级★" if r.get("vol_tick") else "次级蓄力")
         return {"FRESH_LAUNCH":"刚启动","LAUNCHED":"已启动","PUMPED":"已拉完",
                 "CRASHING":"崩盘中","LOW_VOL":"低波动","STABLE":"稳定币",
                 "STOCK":"代币股","UNKNOWN":"未知"}.get(r["label"], r["label"])
-    lab_color = {"COILING":"#f59e0b","FRESH_LAUNCH":"#22c55e","LAUNCHED":"#0ea5e9",
+    lab_color = {"COILING":"#f59e0b","COILING_LITE":"#38bdf8","FRESH_LAUNCH":"#22c55e","LAUNCHED":"#0ea5e9",
                  "PUMPED":"#ef4444","CRASHING":"#6b7280","LOW_VOL":"#4b5563",
                  "STABLE":"#4b5563","STOCK":"#4b5563","UNKNOWN":"#9ca3af"}
     rows = []
