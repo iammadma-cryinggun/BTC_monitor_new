@@ -33,6 +33,19 @@ WICK_UPPER   = 0.50   # S5: upper wick > 50% of range
 WICK_CLOSE   = 0.90   # S5: close < 90% of high
 CRASH_DD     = 0.30   # S6: >=30% drop from peak
 BOUNCE_VOL   = 2.0    # S6 death-bounce: volume spike on rebound
+# event cooldowns (in 4h bars) so stair-step cycles (BTW-style 深针 every ~2
+# days, or an early minor wick followed by the REAL top weeks later) can
+# re-signal, without spamming an event every bar. The old once-per-cycle
+# guard suppressed the real top when a minor wick fired first.
+SHAKE_COOL   = 12     # ~2 days between SHAKEOUT events
+WICK_COOL    = 10     # ~40h between WICKTOP events
+# markup reset: an S4 that has gone quiet may only re-baseline to S1 when the
+# cycle is OLD and the markup has FADED well off its peak. A shallow, quiet
+# platform near the highs (BTW pre-top flat, dd<10%) is a continuation platform
+# and must keep its top/crash signals armed; a deep fade (RAVE-style, dd~28%,
+# below the 30% shakeout band) is a failed markup and should re-baseline.
+MARKUP_RESET_AGE = 100  # bars after launch (~17 days; canonical cycle is 2-4wk)
+MARKUP_RESET_DD  = 0.20 # faded >=20% from peak before a quiet flat may reset
 
 def load_csv(path):
     df = pd.read_csv(path)
@@ -64,7 +77,7 @@ def detect(df4h, df1h=None):
     consol = df["in_consol"].values
     stage = np.array(["S1"] * n, dtype=object)
     events = []  # {type, i, ts, price, note}
-    in_play = False; launch_idx = None; peak = 0.0; launch_vol = 0.0
+    in_play = False; launch_idx = None; peak = 0.0; launch_vol = 0.0; launch_price = 0.0
     phase = "idle"; bounced = False
     for i in range(1, n):
         if in_play and close[i] > peak:
@@ -76,6 +89,7 @@ def detect(df4h, df1h=None):
                     and consol[i-1]):
                 stage[i] = "S2"
                 in_play = True; launch_idx = i; peak = close[i]; launch_vol = volr[i]
+                launch_price = close[i]
                 phase = "launch"; bounced = False
                 events.append(dict(type="LAUNCH", i=i, ts=str(df["ts"].iloc[i]),
                                    price=round(float(close[i]), 6),
@@ -84,19 +98,30 @@ def detect(df4h, df1h=None):
         else:
             if phase != "crash" and SHAKE_LO <= dd <= SHAKE_HI and phase != "shakeout":
                 phase = "shakeout"; stage[i] = "S3"
-                if not any(e["type"] == "SHAKEOUT" and e["i"] > launch_idx for e in events):
+                # cooldown guard: allow repeated shakeouts (BTW-style 深针 every
+                # ~2 days) instead of only the first one per cycle
+                if not any(e["type"] == "SHAKEOUT" and e["i"] > launch_idx
+                           and i - e["i"] < SHAKE_COOL for e in events):
                     events.append(dict(type="SHAKEOUT", i=i, ts=str(df["ts"].iloc[i]),
                                        price=round(float(close[i]), 6),
                                        note=f"drawdown {dd*100:.0f}% from peak {peak:.4f}"))
                 continue
-            if close[i] > peak and volr[i] < launch_vol * 0.9:
+            # S4 markup: this bar IS the new high (peak was already updated to
+            # close[i] at the top of the loop, hence >=, not >) on volume drier
+            # than the launch bar. NB: with `>` this branch was dead code and
+            # no coin ever reached S4.
+            if close[i] >= peak and volr[i] < launch_vol * 0.9:
                 phase = "markup"; stage[i] = "S4"; continue
             rng = (high[i] - low[i])
             upper_wick = (high[i] - max(op[i], close[i])) / (rng + 1e-12)
             if (upper_wick > WICK_UPPER and close[i] < high[i] * WICK_CLOSE
                     and i > launch_idx + 3 and phase not in ("top", "crash")):
                 phase = "top"; stage[i] = "S5"
-                if not any(e["type"] == "WICKTOP" and e["i"] > launch_idx for e in events):
+                # cooldown guard: an early minor wick must not swallow the
+                # REAL top signal weeks later (AKE: Aug minor wick vs the
+                # actual 0.165 top in Sep)
+                if not any(e["type"] == "WICKTOP" and e["i"] > launch_idx
+                           and i - e["i"] < WICK_COOL for e in events):
                     events.append(dict(type="WICKTOP", i=i, ts=str(df["ts"].iloc[i]),
                                        price=round(float(close[i]), 6),
                                        note=f"upper_wick={upper_wick*100:.0f}% of range, high={high[i]:.4f}"))
@@ -113,8 +138,23 @@ def detect(df4h, df1h=None):
                                    price=round(float(close[i]), 6),
                                    note=f"vol_ratio={volr[i]:.1f}x rebound, failed (no new high)"))
                 continue
-            # hold current phase label; allow a new cycle once re-consolidated
-            if phase == "crash" and consol[i-1] and i > launch_idx + 20:
+            # return to S1 once the coin has re-consolidated (15 flat+quiet
+            # bars). Tiered rules:
+            #  - fizzled launches / post-shakeout re-accumulation / crash
+            #    aftermath reset after 20 bars;
+            #  - a *markup* only resets when the cycle is aged (>100 bars,
+            #    past the canonical 2-4wk launch-to-top window) AND either it
+            #    has faded >=20% off its peak, or it is trading BELOW its
+            #    launch price (= failed launch: RAVE ground to ~0.18 vs its
+            #    0.1996 launch). A shallow quiet platform near the highs and
+            #    well above launch (BTW pre-top flat) is a continuation
+            #    platform and must keep its top/crash signals armed.
+            #  - "top" is deliberately NOT resettable: the canonical
+            #    continuation of a wick top is the crash (CRASH stays armed).
+            if (phase in ("launch", "shakeout", "crash") and consol[i-1]
+                    and i > launch_idx + 20) or \
+               (phase == "markup" and consol[i-1] and i > launch_idx + MARKUP_RESET_AGE
+                    and (dd >= MARKUP_RESET_DD or close[i] < launch_price)):
                 in_play = False; phase = "idle"; stage[i] = "S1"; continue
             stage[i] = {"launch":"S2","shakeout":"S3","markup":"S4","top":"S5","crash":"S6"}.get(phase, "S1")
     df["stage"] = stage
