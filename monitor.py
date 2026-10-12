@@ -318,8 +318,29 @@ class Monitor:
             pass
         dt = time.time() - t0
         print(f"[scan] done: {n_ok}/{len(self.universe)} ok, {dt:.0f}s, {len(new_signals)} new signals")
+        # ambush self-learning loop: record fired AMBUSH calls, then refresh
+        # outcome tracking (prices / status transitions) for every open entry
+        try:
+            import ambush_tracker
+            for lvl, sym, msg, ev in new_signals:
+                if lvl == "AMBUSH":
+                    rec = next((r for r in ranked if r["sym"] == sym), None)
+                    if rec is not None:
+                        ambush_tracker.record_entry(rec)
+            ambush_tracker.update(ranked)
+        except Exception as e:
+            print(f"[ambush-track] skipped: {e}")
         if self.first_run:
             self.first_run = False
+            # bootstrap historical stats from the cached klines once (store is
+            # empty) — gives the win-rate dashboard an initial sample instead
+            # of starting from zero after every redeploy
+            try:
+                import ambush_tracker
+                if not ambush_tracker.load()["entries"]:
+                    ambush_tracker.backfill(market=self.market, quiet=True)
+            except Exception as e:
+                print(f"[ambush-backfill] skipped: {e}")
             if emit:
                 self.run_digest()  # give an initial overview on first baseline
         if emit:
@@ -393,6 +414,32 @@ class Monitor:
                 lines.append(f"  {r['sym']:<12} {r['label']} 价{r['price']:.6g}  ~1日{dm_s}")
         lines.append("")
         lines.append("信号会通过本渠道实时推送。手动交易，纪律第一。")
+        # ambush self-review: measure our own AMBUSH calls (the self-learning loop)
+        try:
+            import ambush_tracker
+            st = ambush_tracker.stats()
+            if st["total"]:
+                lines.append("")
+                src_note = f"（含回填 {st['backfill']} 笔，实盘 {st['live']} 笔）" if st["backfill"] else ""
+                lines.append(f"🎯 埋伏信号自检 · 跟踪 {st['total']} 笔{src_note}:")
+                if st["evaluated"]:
+                    lr = f"{st['launch_rate']:.0%}" if st["launch_rate"] is not None else "—"
+                    w3 = f"{st['win30_rate']:.0%}" if st["win30_rate"] is not None else "—"
+                    ap = f"{st['avg_peak']:+.0%}" if st["avg_peak"] is not None else "—"
+                    ad = f"{st['avg_delay']}天" if st["avg_delay"] is not None else "—"
+                    lines.append(f"  已结算 {st['evaluated']}：启动 {st['launched_n']}（{lr}）｜"
+                                 f"启动后 +30% 达标率 {w3} ｜ 平均峰值 {ap} ｜ 平均启动延迟 {ad}")
+                    b = st["buckets"]
+                    def _pct(x):
+                        return f"{x*100:.0f}%" if isinstance(x, (int, float)) else "—"
+                    seg = " ｜ ".join(
+                        f"{k}分: {v['n']}笔启动{_pct(v['launch_rate'])}"
+                        for k, v in b.items() if v["n"])
+                    if seg:
+                        lines.append(f"  分数段启动率 {seg}")
+                lines.append(f"  在途：等待启动 {st['open_waiting']} · 已启动跟踪 {st['open_launched']}")
+        except Exception as e:
+            print(f"[ambush-digest] skipped: {e}")
         text = "\n".join(lines)
         self.notifier.send(f"📅 每日妖币监控 · {date}", text, level="digest")
         self.log_signal("DIGEST", "", f"每日摘要 · 监控 {len(ranked)} 币 · 埋伏 {len(coiling)} · 刚启动 {len(fresh)}")

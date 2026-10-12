@@ -144,6 +144,13 @@ def build_snapshot(ranked, signals, meta=None):
     # integrity flag: rendered table set is far smaller than what was actually
     # scored -> the on-disk file is stale/incomplete. Surface it.
     ranked_lag = bool(retest_ok) and n_coins < max(1, retest_ok * 0.5)
+    # ambush self-review loop (outcome tracking of our own AMBUSH calls)
+    ambush = None
+    try:
+        import ambush_tracker
+        ambush = {"stats": ambush_tracker.stats(), "entries": ambush_tracker.recent(30)}
+    except Exception:
+        pass
     return {
         "meta": {
             "generated": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
@@ -167,6 +174,7 @@ def build_snapshot(ranked, signals, meta=None):
         },
         "ranked": ranked,
         "signals": signals or [],
+        "ambush": ambush,
     }
 
 
@@ -432,6 +440,13 @@ th{color:var(--mut);font-weight:600;position:sticky;top:0;background:var(--card)
   <tbody id="full"></tbody></table>
   <div id="fullnote" class="note"></div>
 </div>
+<div class="card" id="ambcard">
+  <div class="h2">🎯 埋伏信号追踪（自我复盘：自己的埋伏判断，自己算胜率）</div>
+  <div class="kpis" id="ambkpis"></div>
+  <div class="note" id="ambnote"></div>
+  <table><tr><th>信号时间(UTC)</th><th>币种</th><th>来源</th><th>入场价</th><th>状态</th><th>峰值涨幅</th><th>现价/最新</th><th>备注</th></tr>
+  <tbody id="ambrows"></tbody></table>
+</div>
 <div class="card">
   <div class="h2">🔔 信号流（最近 30 条）</div>
   <table><tr><th>时间(UTC)</th><th></th><th>币种</th><th>摘要</th></tr>
@@ -536,6 +551,40 @@ function render(d){
     sg+='<tr><td class="ts">'+ts+'</td><td class="em">'+em+'</td><td class="ssym">'+(s.sym||"")+'</td><td class="smsg">'+msg+'</td></tr>';
   });
   document.getElementById("sigs").innerHTML = sg || '<tr><td colspan="4" class="smsg">（暂无信号）</td></tr>';
+  // ambush self-review card
+  var am=d.ambush, amk=document.getElementById("ambkpis"), amr=document.getElementById("ambrows"), amn=document.getElementById("ambnote");
+  if(amk&&amr&&am&&am.stats){
+    var s=am.stats;
+    function p1(x){ return (typeof x==="number")?(x*100).toFixed(0)+"%":"—"; }
+    amk.innerHTML =
+      '<div class="kpi">跟踪 <b>'+s.total+'</b></div>'+
+      '<div class="kpi">已结算 <b>'+s.evaluated+'</b></div>'+
+      '<div class="kpi">启动率 <b style="color:#22c55e">'+p1(s.launch_rate)+'</b></div>'+
+      '<div class="kpi">+30%达标 <b style="color:#f59e0b">'+p1(s.win30_rate)+'</b></div>'+
+      '<div class="kpi">平均峰值 <b>'+((typeof s.avg_peak==="number")?("+"+(s.avg_peak*100).toFixed(0)+"%"):"—")+'</b></div>'+
+      '<div class="kpi">在途 '+(s.open_waiting+s.open_launched)+' <b>'+(s.open_waiting)+'等/'+(s.open_launched)+'启</b></div>';
+    var SC={waiting:"#f59e0b",launched:"#0ea5e9",win_strong:"#22c55e",win:"#22c55e",weak:"#9ca3af",miss:"#6b7280",pre_fail:"#ef4444",timeout:"#4b5563"};
+    var CN={waiting:"等待启动",launched:"已启动·跟踪中",win_strong:"大赢(+80%)",win:"赢(+30%)",weak:"弱(+10%)",miss:"未达标",pre_fail:"破位失败",timeout:"超时未启动"};
+    var rows="";
+    (am.entries||[]).forEach(function(e){
+      var g=e.peak_gain, gs=(typeof g==="number")?((g>=0?"+":"")+(g*100).toFixed(0)+"%"):"—";
+      var note=e.status==="launched"&&e.launch_delay_d!=null?("启动延迟"+e.launch_delay_d+"天"):(e.score!=null?("信号分"+Math.round(e.score)):"");
+      rows+='<tr><td class="ts">'+(e.ts||"").slice(0,16).replace("T"," ")+'</td>'+
+        '<td class="ssym">'+(e.sym||"")+'</td>'+
+        '<td class="ts">'+(e.source==="live"?"实盘":"回填")+'</td>'+
+        '<td>'+fmtPrice(e.entry_price)+'</td>'+
+        '<td><span class="tag" style="background:'+(SC[e.status]||"#6b7280")+'">'+(CN[e.status]||e.status)+'</span></td>'+
+        '<td class="sc">'+gs+'</td>'+
+        '<td>'+fmtPrice(e.last_price)+'</td>'+
+        '<td class="rs">'+note+'</td></tr>';
+    });
+    amr.innerHTML = rows || '<tr><td colspan="8" class="rs">（暂无埋伏记录——信号触发后自动开始跟踪）</td></tr>';
+    var bk=s.buckets||{}, bs=[];
+    for(var k in bk){ if(bk[k].n) bs.push(k+"分:"+bk[k].n+"笔·启动"+p1(bk[k].launch_rate)); }
+    amn.innerHTML = "口径：45天内启动=成功启动｜启动前−20%=破位失败｜启动后20天峰值计胜负(+80%大赢/+30%赢/+10%弱)"+(bs.length?(" ｜ 分数段: "+bs.join(" · ")):"")+" ｜ 回填样本来自缓存K线（有偏），实盘样本才是干净口径";
+  } else if(amk){
+    document.getElementById("ambcard").style.display="none";
+  }
 }
 function tick(){
   if(!NEXT){ var e=document.getElementById("cd"); if(e) e.textContent="—"; return; }
