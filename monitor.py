@@ -162,7 +162,9 @@ def classify(sym, rec, prev):
         signals.append(("AMBUSH",
             f"{sym} 埋伏★：横盘蓄力中量能抬头。\n"
             f"横盘 {rec.get('flat_run')} 根 4h，区间 {rec.get('range_w',0)*100:.1f}% 宽，"
-            f"价 vs 4h MA99 = {pv_s}。{dv_s}\n加入观察列表，等第一根巨量突破再动手。", None))
+            f"价 vs 4h MA99 = {pv_s}。{dv_s}\n"
+            f"打法：横盘区内即可分批埋伏（本信号即入场窗口，-20%破位止损）；\n"
+            f"或等 🚀ENTER（第一根巨量突破）确认后再入——更稳但价更高。", None))
     # 次级蓄力★：COILING_LITE + 量能刚抬头（且之前不是这个状态）。
     # 大盘币新周期形态：20 日振幅不够妖币门槛，用更久横盘 + 贴 MA99 补偿。
     lite_now = (rec["label"] == "COILING_LITE" and rec.get("vol_tick"))
