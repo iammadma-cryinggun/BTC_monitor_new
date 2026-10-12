@@ -6,6 +6,7 @@
   "digest_hour": 8,
   "local_utc_offset_hours": 8,
   "request_sleep": 0.15,
+  "coinalyze_key": "",
   "web": {
     "enabled": true,
     "host": "0.0.0.0",

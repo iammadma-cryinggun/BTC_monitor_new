@@ -61,6 +61,17 @@ def _f(x):  # format a pct or '—'
     return f"{x*100:+.1f}%" if isinstance(x, (int, float)) else "—"
 
 
+def _usd(x):  # compact USD, e.g. 1.2M / 350K
+    try:
+        x = float(x)
+    except (TypeError, ValueError):
+        return "?"
+    for div, suf in ((1e9, "B"), (1e6, "M"), (1e3, "K")):
+        if abs(x) >= div:
+            return f"{x/div:.1f}{suf}"
+    return f"{x:.0f}"
+
+
 def _age_days(ts_s):
     """Days since an entry ts (ISO string). Naive timestamps are read as UTC."""
     try:
@@ -380,13 +391,30 @@ class TelegramAgent:
                 rec["funding"] = fd
         except Exception:
             pass
-        if rec.get("label") in ("COILING", "FRESH_LAUNCH", "LAUNCHED"):
+        if rec.get("label") in ("COILING", "COILING_LITE", "FRESH_LAUNCH", "LAUNCHED"):
+            # Coinalyze first (batched source, also serves liquidations + LSR
+            # that Binance doesn't), Binance per-coin as backstop
             try:
-                oc = fetch_oi_change(sym)
-                if oc is not None:
-                    rec["oi_chg_24h"] = oc
+                import coinalyze
+                if coinalyze.has_key():
+                    om = coinalyze.fetch_oi_batch([sym]) or {}
+                    if isinstance(om.get(sym), (int, float)):
+                        rec["oi_chg_24h"] = round(om[sym], 4)
+                    lm = coinalyze.fetch_liq_batch([sym]) or {}
+                    if lm.get(sym):
+                        rec["liq_long_24h"], rec["liq_short_24h"] = lm[sym]
+                    rm = coinalyze.fetch_lsr_batch([sym]) or {}
+                    if isinstance(rm.get(sym), (int, float)):
+                        rec["lsr"] = round(rm[sym], 2)
             except Exception:
                 pass
+            if "oi_chg_24h" not in rec:
+                try:
+                    oc = fetch_oi_change(sym)
+                    if oc is not None:
+                        rec["oi_chg_24h"] = oc
+                except Exception:
+                    pass
 
         label = rec.get("label")
         verdicts = {
@@ -423,6 +451,12 @@ class TelegramAgent:
             dv.append(f"资金费率 {fd*100:+.3f}%")
         if isinstance(oc, (int, float)):
             dv.append(f"OI 24h {oc*100:+.0f}%")
+        lr = rec.get("lsr")
+        if isinstance(lr, (int, float)):
+            dv.append(f"账户多空比 {lr:.2f}")
+        lq_l, lq_s = rec.get("liq_long_24h"), rec.get("liq_short_24h")
+        if isinstance(lq_l, (int, float)) and isinstance(lq_s, (int, float)) and (lq_l or lq_s):
+            dv.append(f"24h清算 多${_usd(lq_l)}/空${_usd(lq_s)}")
         lines = [
             f"🔎 {sym} 实时判定" + ("（离线数据，可能陈旧）" if stale else ""),
             f"阶段 {rec.get('stage')} · 标签 {rec.get('label')} · 分 {rec.get('score', 0):.0f}{pot_s}",
@@ -477,11 +511,26 @@ if __name__ == "__main__":
         {"sym": sym, "label": "COILING", "stage": "S1", "score": 80,
          "price": 0.001, "reason": "smoke", "pv": 0.10, "vol_tick": True}, None)
     fetch_funding_all = lambda: {sym: -0.001}
+    # hermetic part 2: ans_check also touches fetch_oi_change / coinalyze /
+    # timing (15m VWAP gate) — all network. Stub all three or a blocked
+    # network can HANG the smoke (connection blackhole, not fast-fail).
+    _real_oi = fetch_oi_change
+    fetch_oi_change = lambda s: None
+    import coinalyze as _cz
+    _real_cz_key = _cz.has_key
+    _cz.has_key = lambda: False
+    import timing as _t
+    _real_t_an, _real_t_rg = _t.analyze, _t.regime
+    _t.analyze = lambda sym, market="futures": None
+    _t.regime = lambda market="futures": None
     for q in ["/help", "/HELP", "状态", "埋伏列表", "追踪", "BANKUSDT 还能埋伏吗",
               "BANKUSDT 信号失效了吗", "失效", "/check", "你好"]:
         r = ag.answer(q)
         print(f"--- {q!r} ->\n{r}\n" if r else f"--- {q!r} -> None\n")
     score_coin, fetch_funding_all = _real_score, _real_fund
+    fetch_oi_change = _real_oi
+    _cz.has_key = _real_cz_key
+    _t.analyze, _t.regime = _real_t_an, _real_t_rg
     # regression test for the poll-loop bug: _api returns the FULL dict
     # {"ok":..., "result":[...]}; iterating the dict itself yields keys and
     # crashed with TypeError on u["update_id"] — updates were never handled.

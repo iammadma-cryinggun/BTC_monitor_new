@@ -92,6 +92,18 @@ def now_iso():
     return datetime.now(timezone.utc).isoformat()
 
 
+def _usd(x):
+    """Compact USD for signal messages, e.g. 1.2M / 350K."""
+    try:
+        x = float(x)
+    except (TypeError, ValueError):
+        return "?"
+    for div, suf in ((1e9, "B"), (1e6, "M"), (1e3, "K")):
+        if abs(x) >= div:
+            return f"{x/div:.1f}{suf}"
+    return f"{x:.0f}"
+
+
 def event_sig(e):
     return f"{e.get('type')}@{e.get('ts')}"
 
@@ -187,6 +199,12 @@ def classify(sym, rec, prev, btc_regime=None, market="futures"):
             dv.append(f"资金费率 {fd*100:+.3f}%")
         if isinstance(oc, (int, float)):
             dv.append(f"OI 24h {oc*100:+.0f}%")
+        lr = rec.get("lsr")
+        if isinstance(lr, (int, float)):
+            dv.append(f"账户多空比 {lr:.2f}")
+        lq_l, lq_s = rec.get("liq_long_24h"), rec.get("liq_short_24h")
+        if isinstance(lq_l, (int, float)) and isinstance(lq_s, (int, float)) and (lq_l or lq_s):
+            dv.append(f"24h清算 多${_usd(lq_l)}/空${_usd(lq_s)}")
         dv_s = ""
         if dv:
             dv_s = "\n" + "·".join(dv)
@@ -212,6 +230,12 @@ def classify(sym, rec, prev, btc_regime=None, market="futures"):
             dv.append(f"资金费率 {fd*100:+.3f}%")
         if isinstance(oc, (int, float)):
             dv.append(f"OI 24h {oc*100:+.0f}%")
+        lr = rec.get("lsr")
+        if isinstance(lr, (int, float)):
+            dv.append(f"账户多空比 {lr:.2f}")
+        lq_l, lq_s = rec.get("liq_long_24h"), rec.get("liq_short_24h")
+        if isinstance(lq_l, (int, float)) and isinstance(lq_s, (int, float)) and (lq_l or lq_s):
+            dv.append(f"24h清算 多${_usd(lq_l)}/空${_usd(lq_s)}")
         dv_s = ""
         if dv:
             dv_s = "\n" + "·".join(dv)
@@ -338,6 +362,64 @@ class Monitor:
             print(f"[dashboard] write skipped: {e}")
 
     # ---- scanning ----
+    def _deriv_pass(self, ranked, offline=False):
+        """Attach OI (priority-allocated) + liquidations + LSR to ranked recs.
+
+        OI history costs one API call per symbol no matter the source, so
+        coverage must follow potential instead of the alphabetical scan
+        order (a coin used to get OI because of its name, not its merit).
+        Coinalyze is primary (20 syms/request, plus liquidations and the
+        accounts long/short ratio that Binance doesn't serve historically);
+        Binance per-coin calls backstop the misses. Mutates recs in place.
+        LSR semantics: r = long/short accounts (BTC~1.5, ETH~2.7 in calm
+        markets); r << 1 while coiling = crowded shorts = squeeze fuel.
+        """
+        if offline:
+            return
+        OI_LABELS = ("COILING", "COILING_LITE", "FRESH_LAUNCH", "LAUNCHED")
+        OI_TOP = 100    # OI coverage: top candidates by potential
+        XTRA_TOP = 30   # liquidations + LSR: top slice only (3x call cost)
+        cands = [r for r in ranked if r.get("label") in OI_LABELS]
+        cands.sort(key=lambda r: -r.get("potential", r.get("score", 0)))
+        top = cands[:OI_TOP]
+        got = set()
+        try:
+            import coinalyze
+            if coinalyze.has_key():
+                oi_map = coinalyze.fetch_oi_batch([r["sym"] for r in top]) or {}
+                xtra = [r["sym"] for r in cands[:XTRA_TOP]]
+                liq_map = coinalyze.fetch_liq_batch(xtra) or {}
+                lsr_map = coinalyze.fetch_lsr_batch(xtra) or {}
+                for r in top:
+                    oc = oi_map.get(r["sym"])
+                    if isinstance(oc, (int, float)):
+                        r["oi_chg_24h"] = round(oc, 4)
+                        got.add(r["sym"])
+                    lq = liq_map.get(r["sym"])
+                    if lq:
+                        r["liq_long_24h"], r["liq_short_24h"] = lq
+                    lr = lsr_map.get(r["sym"])
+                    if isinstance(lr, (int, float)):
+                        r["lsr"] = round(lr, 2)
+                print(f"[deriv] coinalyze: OI {len(got)}/{len(top)}, "
+                      f"liq {len(liq_map)}, lsr {len(lsr_map)}")
+        except Exception as e:
+            print(f"[deriv] coinalyze pass failed: {e}")
+        # Binance per-coin backstop for whatever Coinalyze missed (cap 60)
+        miss = [r for r in top if r["sym"] not in got]
+        for r in miss[:60]:
+            try:
+                oc = fetch_oi_change(r["sym"])
+                if oc is not None:
+                    r["oi_chg_24h"] = round(oc, 4)
+                    time.sleep(0.1)
+            except Exception:
+                pass
+        # recompute potential where OI landed (squeeze bonus now counts)
+        for r in top:
+            if r.get("label") in ("COILING", "COILING_LITE") and "oi_chg_24h" in r:
+                r["potential"] = potential_of(r)
+
     def run_scan(self, emit=True):
         state = self.load_state()
         state_out = dict(state)
@@ -357,8 +439,6 @@ class Monitor:
                     print(f"[deriv] funding: {len(funding_map)} symbols (bulk premiumIndex)")
             except Exception as e:
                 print(f"[deriv] funding fetch failed: {e}")
-        oi_budget = [80]   # max per-coin OI history calls per scan
-        OI_LABELS = ("COILING", "COILING_LITE", "FRESH_LAUNCH", "LAUNCHED")
         # BTC 15m regime (VWAP + 9/20 EMA) — computed once per scan, gates all
         # entry-type signal messages ("don't recommend fresh longs into a dump")
         self.btc_regime = None
@@ -395,25 +475,31 @@ class Monitor:
                 print(f"  skip {sym}: {err}  [{reason}]")
                 continue
             n_ok += 1
-            # attach derivatives context BEFORE classify so signal messages
-            # can quote it (funding = retail sentiment; OI = positioning)
+            # funding comes from ONE bulk call, so every coin gets it up
+            # front; OI/liquidations/LSR cost one call per symbol wherever
+            # they come from, so they are allocated in a priority pass
+            # AFTER scoring (by potential — not alphabetical scan order),
+            # and signals are classified in a second pass so their messages
+            # can quote the full derivatives context
             f = funding_map.get(sym) if funding_map else None
             if f is not None:
                 rec["funding"] = f
-            if rec["label"] in OI_LABELS and oi_budget[0] > 0:
-                oi_budget[0] -= 1
-                try:
-                    oc = fetch_oi_change(sym)
-                    if oc is not None:
-                        rec["oi_chg_24h"] = round(oc, 4)
-                        time.sleep(0.1)
-                except Exception:
-                    pass
-            # recompute potential now that funding/OI are attached (squeeze
-            # bonus only counts with derivatives context present)
+            # potential without OI yet; the priority pass recomputes it for
+            # the coins that actually get OI (squeeze bonus needs it present)
             if rec["label"] in ("COILING", "COILING_LITE"):
                 rec["potential"] = potential_of(rec)
             ranked.append(rec)
+            time.sleep(self.request_sleep)
+        # ---- derivatives priority pass: OI (plus liquidations / accounts
+        # long-short ratio) costs one API call per symbol, so coverage is
+        # allocated by POTENTIAL, not by the alphabetical scan order that
+        # used to decide who got OI. Coinalyze batches 20 symbols per
+        # request; Binance per-coin calls backstop whatever it misses.
+        self._deriv_pass(ranked, offline=offline)
+        # ---- signal classification (second pass, after derivatives so
+        # AMBUSH / ENTER messages can quote the full context) ----
+        for rec in ranked:
+            sym = rec["sym"]
             prev = state.get(sym)
             signals, cur_sigs = classify(sym, rec, prev,
                                          btc_regime=self.btc_regime, market=self.market)
@@ -428,7 +514,6 @@ class Monitor:
             if emit and prev is not None:   # skip signal emission on very first baseline
                 for lvl, msg, ev in signals:
                     new_signals.append((lvl, sym, msg, ev))
-            time.sleep(self.request_sleep)
         # entry-timing badges for the watchlist (15m VWAP/EMA gate):
         # coverage is ALL main-tier COILING + FRESH_LAUNCH (the actionable set),
         # then LITE by *potential* (not score — potential = elasticity x fuel,

@@ -392,17 +392,21 @@ setTimeout(function(){{ location.reload(); }}, 30000);
 
 def _deriv_cell(r):
     """Compact 'OI·费率' cell, e.g. 'OI+18%·费率-0.021%'. Hover shows raw values."""
-    oc = r.get("oi_chg_24h"); fd = r.get("funding")
+    oc = r.get("oi_chg_24h"); fd = r.get("funding"); lr = r.get("lsr")
     parts = []
     if isinstance(oc, (int, float)):
         parts.append(f"OI{oc*100:+.0f}%")
     if isinstance(fd, (int, float)):
         parts.append(f"费率{fd*100:+.3f}%")
+    if isinstance(lr, (int, float)):
+        parts.append(f"多空比{lr:.2f}")
     if not parts:
         return '<td class="rs">—</td>'
     t_oi = f"OI 24h {oc*100:+.1f}%" if isinstance(oc, (int, float)) else "OI 24h n/a"
     t_fd = f"资金费率 {fd*100:+.4f}%" if isinstance(fd, (int, float)) else "资金费率 n/a"
-    return f'<td class="rs" title="{t_oi} · {t_fd}">{"·".join(parts)}</td>'
+    t_lr = f"账户多空比(多/空) {lr:.2f}" if isinstance(lr, (int, float)) else ""
+    title = " · ".join(x for x in (t_oi, t_fd, t_lr) if x)
+    return f'<td class="rs" title="{title}">{"·".join(parts)}</td>'
 
 def _pot_cell(r):
     """Potential cell: bold gold >=75, green >=60, muted otherwise."""
@@ -536,6 +540,7 @@ function row(r){
   var dv=[];
   if(typeof r.oi_chg_24h==="number") dv.push("OI"+fmtPct(r.oi_chg_24h));
   if(typeof r.funding==="number") dv.push("费率"+(r.funding*100).toFixed(3)+"%");
+  if(typeof r.lsr==="number") dv.push("多空比"+r.lsr.toFixed(2));
   var dcell=dv.length?('<td class="rs">'+dv.join("·")+"</td>"):'<td class="rs">—</td>';
   return '<tr><td class="sym">'+(r.sym||"")+'</td>'+
     '<td><span class="tag" style="background:'+c+'">'+tag+'</span></td>'+
