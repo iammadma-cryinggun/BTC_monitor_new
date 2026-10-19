@@ -1020,6 +1020,12 @@ class Monitor:
         ss = m.get("scan_summary")
         if isinstance(ss, dict):
             self.scan_summary = ss
+            # carry the outage flag across restarts: if the last persisted
+            # round was a total failure, the first SUCCESSFUL scan after this
+            # boot should still send the 🟢 recovery note (without this the
+            # flag resets to True on every restart and the note never fires)
+            if ss.get("ok") == 0:
+                self._feed_was_ok = False
         print(f"[startup] restored previous dashboard: {len(rk)} coins, "
               f"scan ok={ss.get('ok') if isinstance(ss, dict) else '?'}")
 

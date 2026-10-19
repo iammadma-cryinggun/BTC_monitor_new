@@ -682,6 +682,8 @@ class DashboardServer:
     `/dashboard_data.json` -> the live data JSON (generated fresh, no-store)
     `/dashboard.html`      -> static snapshot (offline viewing)
     `/state.json` / `/signals.json` -> raw data files
+    `POST /restore_track`  -> restore the ambush tracker from a local backup
+                              (token-gated; see do_POST)
     """
     def __init__(self, host="0.0.0.0", port=8080, data_dir=DATA, monitor=None):
         self.host = host
@@ -696,6 +698,72 @@ class DashboardServer:
         class _H(http.server.SimpleHTTPRequestHandler):
             def __init__(self, *a, **k):
                 super().__init__(*a, directory=data_dir, **k)
+            def do_POST(self):
+                """Restore the ambush tracker from a local backup file.
+
+                2026-10-19 incident: a manual restart rescheduled the pod onto
+                a node whose data volume came up EMPTY — monitor_state /
+                ambush_track / scan_summary all vanished. ambush_track.json is
+                the irreplaceable one (self-learning win-rate bookkeeping), so
+                the user keeps local downloads of it and pushes them back
+                through this endpoint.
+
+                POST /restore_track[?force=1]
+                  header  X-Restore-Token: <RESTORE_TOKEN env var>
+                  body    raw JSON {"entries":[...]} (an ambush_track.json)
+                Guards: token must match RESTORE_TOKEN (endpoint disabled
+                entirely when unset); a NON-empty existing tracker is refused
+                unless ?force=1; body must parse and carry entries.
+                """
+                path, _, qs = self.path.partition("?")
+                force = "force=1" in qs
+                if path != "/restore_track":
+                    self._reply_json(404, {"ok": False, "error": "unknown POST route"})
+                    return
+                token = os.environ.get("RESTORE_TOKEN", "").strip()
+                if not token:
+                    self._reply_json(403, {"ok": False,
+                                           "error": "restore disabled: RESTORE_TOKEN env var not set"})
+                    return
+                if self.headers.get("X-Restore-Token", "").strip() != token:
+                    self._reply_json(403, {"ok": False, "error": "bad token"})
+                    return
+                try:
+                    length = int(self.headers.get("Content-Length") or 0)
+                    body = self.rfile.read(length) if length > 0 else b""
+                    store = json.loads(body.decode("utf-8"))
+                    entries = store.get("entries")
+                    if not isinstance(entries, list) or not entries:
+                        raise ValueError("body has no entries")
+                    cur = os.path.join(data_dir, "ambush_track.json")
+                    if os.path.exists(cur) and not force:
+                        try:
+                            with open(cur, encoding="utf-8") as f:
+                                n_cur = len(json.load(f).get("entries") or [])
+                        except Exception:
+                            n_cur = 0
+                        if n_cur > 0:
+                            self._reply_json(409, {"ok": False,
+                                                   "error": f"tracker non-empty ({n_cur} entries); "
+                                                            f"add ?force=1 to overwrite"})
+                            return
+                    tmp = cur + ".tmp"
+                    with open(tmp, "w", encoding="utf-8") as f:
+                        json.dump(store, f, indent=2, ensure_ascii=False, default=str)
+                    os.replace(tmp, cur)
+                    print(f"[restore] ambush_track.json restored via POST: {len(entries)} entries")
+                    self._reply_json(200, {"ok": True, "restored": len(entries)})
+                except Exception as e:
+                    self._reply_json(400, {"ok": False, "error": str(e)})
+
+            def _reply_json(self, code, obj):
+                body = json.dumps(obj, ensure_ascii=False).encode("utf-8")
+                self.send_response(code)
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
             def do_GET(self):
                 # strip query string (cache-busters) before matching
                 self.path = self.path.split("?", 1)[0]
