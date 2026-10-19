@@ -28,6 +28,11 @@
   - 只访问公开行情 klines（无需 API key，权重极低）
   - 每个币之间 sleep（默认 0.15s），整轮约 30~90s，远低于 Binance 限制
   - 多 host 轮换 + 失败指数退避（memecoin_scanner.fetch_klines 已实现）
+  - kline host 每轮只探测一次并按延迟排序（pick_kline_hosts），消灭逐币
+    逐 host 的超时爬行（2026-10-19 事故：一轮爬 30 小时从未完成）；探测
+    全失败时每币快速失败（2 host x 5s），断流告警接管
+  - 扫描预算（SCAN_BUDGET_S，默认 2400s）：超时即收尾，剩余币记
+    skip_reasons["budget"]，保证每轮都能落盘、看板不冻结在启动时间戳
   - 不读账户、不下单，纯只读
 
 部署: 见 README.md（Zeabur Service + Dockerfile，区域选 Binance 友好区如 SG/JP）。
@@ -623,7 +628,22 @@ class Monitor:
                     print(f"[timing] BTC 15m regime: {self.btc_regime}")
             except Exception as e:
                 print(f"[timing] regime failed: {e}")
-        for sym in self.universe:
+        # scan budget: never let one round crawl for hours. With the kline-host
+        # probe a healthy round takes minutes; if we blow past the budget the
+        # egress is pathological — finish with what we have and let the outage
+        # alerting / fast-retry machinery handle the rest.
+        try:
+            budget_s = int(os.environ.get("SCAN_BUDGET_S", "2400"))
+        except ValueError:
+            budget_s = 2400
+        deadline = t0 + budget_s
+        for i, sym in enumerate(self.universe):
+            if time.time() > deadline:
+                rem = len(self.universe) - i
+                skip_reasons["budget"] = skip_reasons.get("budget", 0) + rem
+                print(f"[scan] budget {budget_s}s exceeded after {i}/{len(self.universe)} "
+                      f"coins; skipping the remaining {rem} this round")
+                break
             try:
                 rec, err = score_coin(sym, market=self.market, force_fetch=not offline)
             except Exception as e:
@@ -663,6 +683,10 @@ class Monitor:
                 rec["potential"] = potential_of(rec)
             ranked.append(rec)
             time.sleep(self.request_sleep)
+            if (i + 1) % 50 == 0:
+                print(f"[scan] progress {i+1}/{len(self.universe)} ok={n_ok} "
+                      f"skip={sum(skip_reasons.values())} "
+                      f"elapsed={int(time.time()-t0)}s")
         # ---- derivatives priority pass: OI (plus liquidations / accounts
         # long-short ratio) costs one API call per symbol, so coverage is
         # allocated by POTENTIAL, not by the alphabetical scan order that

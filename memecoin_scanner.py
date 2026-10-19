@@ -131,29 +131,82 @@ def _proxy_opener():
     except Exception:
         return urllib.request.build_opener()
 
+def _kline_candidate_hosts(market="spot"):
+    """All hosts fetch_klines MAY use, in nominal preference order."""
+    if market == "futures":
+        return (FUT_KLINE_HOSTS
+                + ["https://fapi3.binance.com/fapi/v1/klines",
+                   "https://fapi4.binance.com/fapi/v1/klines",
+                   "https://fapi5.binance.com/fapi/v1/klines"]
+                + SPOT_KLINE_HOSTS
+                + ["https://api.binance.vision/api/v3/klines"])
+    return (SPOT_KLINE_HOSTS
+            + ["https://api.binance.vision/api/v3/klines"]
+            + FUT_KLINE_HOSTS)
+
+# probed host order, cached per market (~one sweep per scan round)
+_KLINE_HOST_CACHE = {}
+
+def pick_kline_hosts(market="spot", max_age=1800, probe_sym="BTCUSDT"):
+    """Probe every candidate kline host ONCE per round (not per coin!) with a tiny
+    request; return reachable hosts, fastest-first. Cached ~30 min.
+
+    Why this exists (2026-10-19 incident): fetch_klines used to walk ~10 hosts
+    per COIN with a 10s timeout each. On an egress where the connectivity ping
+    succeeds but kline GETs black-hole (DPI / large-payload filtering), one coin
+    cost ~100s and a 519-coin round ~30 HOURS — the scan never finished, the
+    dashboard froze at its init timestamp and no signal was ever emitted.
+    Probing once costs <= ~40s worst case; afterwards every coin is ONE request
+    against a known-good host. Returns [] when nothing answers.
+    """
+    import urllib.request, time as _time
+    now = _time.time()
+    c = _KLINE_HOST_CACHE.get(market)
+    if c and now - c["ts"] < max_age:
+        return list(c["hosts"])
+    opener = _proxy_opener()
+    cands = _kline_candidate_hosts(market)
+    scored = []
+    for host in cands:
+        t0 = _time.time()
+        try:
+            url = f"{host}?symbol={probe_sym}&interval=4h&limit=5"
+            req = urllib.request.Request(url, headers=UA)
+            with opener.open(req, timeout=4) as resp:
+                raw = json.loads(resp.read())
+            if raw:
+                scored.append((_time.time() - t0, host))
+        except Exception:
+            pass
+    scored.sort()
+    hosts = [h for _, h in scored]
+    _KLINE_HOST_CACHE[market] = {"ts": now, "hosts": hosts}
+    tag = market
+    names = ", ".join(h.split("//")[1].split("/")[0].split(".")[0] for h in hosts)
+    print(f"[kline-hosts] {tag}: probed {len(cands)} hosts, "
+          f"{len(hosts)} reachable -> {names or 'NONE'}")
+    return hosts
+
 def fetch_klines(sym, interval, limit, market="spot"):
     import urllib.request, http.client, urllib.error
     opener = _proxy_opener()
-    # Try every reachable host. For futures we also fall back to SPOT klines
-    # (api.binance.vision mirror is usually NOT geo-blocked) so that coins listed on
-    # both markets still get scored even if fapi is blocked from this host.
-    if market == "futures":
-        hosts = (FUT_KLINE_HOSTS
-                 + ["https://fapi3.binance.com/fapi/v1/klines",
-                    "https://fapi4.binance.com/fapi/v1/klines",
-                    "https://fapi5.binance.com/fapi/v1/klines"]
-                 + SPOT_KLINE_HOSTS
-                 + ["https://api.binance.vision/api/v3/klines"])
+    # ONE probe sweep per ~30 min decides the host order for every coin, so a
+    # partially-blocked egress costs ~40s per ROUND instead of ~100s per COIN.
+    # If the probe found nothing, fail fast (2 hosts, short timeout) instead of
+    # crawling 10 hosts x 10s per coin — the outage alerting takes it from there.
+    probed = pick_kline_hosts(market)
+    if probed:
+        hosts = probed
+        timeout = 10
     else:
-        hosts = (SPOT_KLINE_HOSTS
-                 + ["https://api.binance.vision/api/v3/klines"]
-                 + FUT_KLINE_HOSTS)
+        hosts = _kline_candidate_hosts(market)[:2]
+        timeout = 5
     last_err = None
     for host in hosts:
         try:
             url = f"{host}?symbol={sym}&interval={interval}&limit={limit}"
             req = urllib.request.Request(url, headers=UA)
-            with opener.open(req, timeout=10) as resp:
+            with opener.open(req, timeout=timeout) as resp:
                 raw = resp.read()
             raw = json.loads(raw)
             if not raw:
