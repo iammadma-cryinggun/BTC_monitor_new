@@ -7,9 +7,12 @@
   - 跨扫描维护 state.json，只在「阶段/事件发生转移」时推送信号:
         🚀 ENTER   新启动 (S2 第一根巨量突破)  -> 进观察列表做 S3->S4
         💧 DIP     S3 洗盘 -> 可低吸
-        🔥 AMBUSH  横盘蓄力 + 量能抬头 -> 加入埋伏观察，等启动
+        🔥 AMBUSH  横盘蓄力 + 量能抬头连续两轮确认 -> 加入埋伏观察，等启动
         🔵 AMBUSH_LITE 次级蓄力（大盘币新周期：横盘更久+贴MA99，20日振幅未达妖币门槛）
                  -> 小仓位埋伏观察，等启动；追踪器按 tier=lite 分开统计胜率
+        （AMBUSH 类信号有双重防抖：①vol_tick 需连续两轮扫描确认（4h K 被 2h 扫描
+          采样两次会闪烁）；②该币已有活跃埋伏追踪 entry 时不再重发——与追踪器的
+          每币单条去重对齐，防止刷屏）
         ⚠️ TOP     4h 插针见顶 -> 至少减一半
         📉 MA25    放量跌破 4h MA25 -> 再减一半 (规则#6)
         🚪 MA99    跌破 4h MA99 -> 全部离场 (规则#7)
@@ -185,10 +188,14 @@ def classify(sym, rec, prev, btc_regime=None, market="futures"):
                 fd_s = f"\n当前资金费率 {fd*100:+.3f}%（空头挤爆在付钱）—— 剧本：极端负费率不是底。"
             signals.append(("BOUNCE",
                 f"{sym} 崩后巨量反弹（{note}）。这是阶段6，不是底，别追。{fd_s}", e))
-    # 埋伏★：COILING + 量能刚抬头（且之前不是这个状态）
-    ambush_now = (rec["label"] == "COILING" and rec.get("vol_tick"))
-    ambush_prev = bool(prev and prev.get("label") == "COILING" and prev.get("vol_tick"))
-    if ambush_now and not ambush_prev:
+    # 埋伏★：COILING + 量能抬头连续两轮扫描确认（vt_streak 刚跨过 2）。
+    # vol_tick 单轮 True 不可信：4h K 每根会被 2h 扫描采样两次（成形中/收盘后
+    # 量不同），网络失败轮走 cached fallback 时 vol_tick=False，True/False 闪烁
+    # 会让"状态转换"反复重触发（实测一轮重发过 107 条）。streak 由 run_scan
+    # 维护在 state 里；发射端另有按 tracker 活跃 entry 的去重兜底。
+    _streak = rec.get("vt_streak") or 0
+    _prev_streak = (prev.get("vt_streak") or 0) if prev else 0
+    if (rec["label"] == "COILING" and _streak >= 2 and _prev_streak < 2):
         pv = rec.get("pv")
         pv_s = f"{pv*100:+.0f}%" if pv is not None else "n/a"
         # derivatives context: negative funding + rising OI while coiling =
@@ -217,11 +224,9 @@ def classify(sym, rec, prev, btc_regime=None, market="futures"):
             f"打法：横盘区内即可分批埋伏（本信号即入场窗口，-20%破位止损）；\n"
             f"或等 🚀ENTER（第一根巨量突破）确认后再入——更稳但价更高。"
             + timing_gate(sym, market, btc_regime, "ambush"), None))
-    # 次级蓄力★：COILING_LITE + 量能刚抬头（且之前不是这个状态）。
+    # 次级蓄力★：COILING_LITE + 量能抬头连续两轮确认（同主档的 flicker 防抖）。
     # 大盘币新周期形态：20 日振幅不够妖币门槛，用更久横盘 + 贴 MA99 补偿。
-    lite_now = (rec["label"] == "COILING_LITE" and rec.get("vol_tick"))
-    lite_prev = bool(prev and prev.get("label") == "COILING_LITE" and prev.get("vol_tick"))
-    if lite_now and not lite_prev:
+    if (rec["label"] == "COILING_LITE" and _streak >= 2 and _prev_streak < 2):
         pv = rec.get("pv")
         pv_s = f"{pv*100:+.0f}%" if pv is not None else "n/a"
         fd = rec.get("funding"); oc = rec.get("oi_chg_24h")
@@ -498,9 +503,28 @@ class Monitor:
         self._deriv_pass(ranked, offline=offline)
         # ---- signal classification (second pass, after derivatives so
         # AMBUSH / ENTER messages can quote the full context) ----
+        # coins already being tracked: a re-fire carries no new information
+        # (the tracker keeps ONE active entry per coin), so don't spam
+        # Telegram / the signals log with vol_tick flicker re-fires.
+        tracked_syms = set()
+        try:
+            import ambush_tracker
+            tracked_syms = ambush_tracker.active_syms()
+        except Exception as e:
+            print(f"[ambush-track] active_syms skipped: {e}")
         for rec in ranked:
             sym = rec["sym"]
             prev = state.get(sym)
+            # vol_tick hysteresis: consecutive scans where the coin is coiling
+            # with the volume tick ON. A single True is noise (each 4h bar is
+            # sampled twice per 2h-scan cycle; cached-fallback rounds read
+            # vol_tick=False), so AMBUSH requires the streak to cross 2 —
+            # classify() reads vt_streak from the rec. Label excursions
+            # (coil -> launch -> re-coil) reset the streak, so a genuinely
+            # NEW episode still fires.
+            _ready = (rec.get("label") in ("COILING", "COILING_LITE")
+                      and bool(rec.get("vol_tick")))
+            rec["vt_streak"] = ((prev.get("vt_streak") or 0) + 1) if _ready else 0
             signals, cur_sigs = classify(sym, rec, prev,
                                          btc_regime=self.btc_regime, market=self.market)
             state_out[sym] = {
@@ -508,11 +532,14 @@ class Monitor:
                 "vol_tick": rec.get("vol_tick"), "price": rec["price"],
                 "pv": rec.get("pv"), "ma99_1h": rec.get("ma99_1h"),
                 "flat_run": rec.get("flat_run"), "range_w": rec.get("range_w"),
+                "vt_streak": rec["vt_streak"],
                 "event_sigs": list(cur_sigs), "updated": now_iso(),
                 "first_seen": (prev.get("first_seen") if prev else now_iso()),
             }
             if emit and prev is not None:   # skip signal emission on very first baseline
                 for lvl, msg, ev in signals:
+                    if lvl in ("AMBUSH", "AMBUSH_LITE") and sym in tracked_syms:
+                        continue  # already tracked: re-fire is flicker noise
                     new_signals.append((lvl, sym, msg, ev))
         # entry-timing badges for the watchlist (15m VWAP/EMA gate):
         # coverage is ALL main-tier COILING + FRESH_LAUNCH (the actionable set),

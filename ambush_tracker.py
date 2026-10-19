@@ -228,6 +228,17 @@ def recent(limit=30):
     return ent[:limit]
 
 
+def active_syms():
+    """Set of coins with an open (not finalized) track entry.
+
+    The monitor consults this before emitting an AMBUSH/AMBUSH_LITE signal:
+    the tracker keeps ONE active entry per coin, so a re-fire while an entry
+    is open adds no information — it's vol_tick flicker between 2h scans
+    (observed: 107 re-fires in a single scan round), not a new ambush window.
+    """
+    return {e["sym"] for e in load()["entries"] if e["status"] not in FINAL}
+
+
 # ----------------------------------------------------------------------------
 def backfill(market="futures", quiet=False):
     """Replay cached 4h CSVs through the state machine to bootstrap historical

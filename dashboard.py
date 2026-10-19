@@ -26,6 +26,9 @@ DATA = os.path.join(HERE, "data")
 DASH_PATH = os.path.join(DATA, "dashboard.html")
 DATA_JSON_PATH = os.path.join(DATA, "dashboard_data.json")
 SIGNALS_PATH = os.path.join(DATA, "signals_log.json")
+# rolling log cap: 200 entries filled up in ~6h during a vol_tick flicker flood
+# (107 AMBUSH re-fires in one scan round), leaving no history at all.
+SIGNALS_LIMIT = 2000
 
 # Build/version marker so the deployed container can be identified at a glance.
 # Resolution order:
@@ -84,7 +87,7 @@ def append_signal(level, sym, msg, ev_type=None):
         "msg": msg or "",
         "ev": ev_type,
     })
-    sigs = sigs[-200:]
+    sigs = sigs[-SIGNALS_LIMIT:]
     os.makedirs(DATA, exist_ok=True)
     with open(SIGNALS_PATH, "w", encoding="utf-8") as f:
         json.dump(sigs, f, indent=2, default=str)
