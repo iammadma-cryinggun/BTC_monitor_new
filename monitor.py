@@ -719,7 +719,13 @@ class Monitor:
             # NEW episode still fires.
             _ready = (rec.get("label") in ("COILING", "COILING_LITE")
                       and bool(rec.get("vol_tick")))
-            rec["vt_streak"] = ((prev.get("vt_streak") or 0) + 1) if _ready else 0
+            # NOTE the prev guard: on a baseline scan (or after a volume wipe)
+            # prev is None for EVERY coin — an unguarded prev.get here crashed
+            # the whole scan ('NoneType' object has no attribute 'get',
+            # 2026-10-19 incident) and, inside the while loop, killed the
+            # monitor thread entirely while the dashboard kept serving frozen
+            # data forever.
+            rec["vt_streak"] = (((prev.get("vt_streak") or 0) if prev else 0) + 1) if _ready else 0
             signals, cur_sigs = classify(sym, rec, prev,
                                          btc_regime=self.btc_regime, market=self.market)
             state_out[sym] = {
@@ -1136,11 +1142,22 @@ class Monitor:
             # fast retry after a total data outage (egress IP blocked after a
             # redeploy, transient ban) — don't sit in the dark for 2 hours
             if now - last_scan >= self._effective_interval_s():
-                self.run_scan(emit=True)
+                # a crashing scan must NEVER kill the monitor loop: today a
+                # single unhandled exception left the dashboard thread serving
+                # frozen data while the scanner was dead (2026-10-19).
+                try:
+                    self.run_scan(emit=True)
+                except Exception as e:
+                    import traceback
+                    print(f"[scan] CRASHED (monitor keeps running): {e}")
+                    traceback.print_exc()
                 last_scan = now
             local = self.utc_to_local(now)
             if local.hour == self.digest_hour and local.minute < 12 and local.date() != last_digest_date:
-                self.run_digest()
+                try:
+                    self.run_digest()
+                except Exception as e:
+                    print(f"[digest] failed (monitor keeps running): {e}")
                 last_digest_date = local.date()
             # heartbeat sleep
             for _ in range(60):

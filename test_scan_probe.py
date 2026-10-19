@@ -127,6 +127,44 @@ check("dead probe: only 2 fail-fast attempts (not 10x10s crawl)",
 
 urllib.request.build_opener = _orig_build
 
+class FakeNotifier:
+    def __init__(self): self.sent = []
+    def send(self, title, message, level="info"):
+        self.sent.append((title, level)); return True
+
+# ---------- 6. THE 2026-10-19 crash: baseline scan, empty state, vol_tick=True ----------
+# prev is None for every coin on the first scan after a volume wipe; the old
+# code did prev.get("vt_streak") unguarded -> 'NoneType' object has no
+# attribute 'get' -> whole scan aborted -> state never written -> dashboard
+# frozen forever. Must complete and record vt_streak=1.
+os.environ.pop("SCAN_BUDGET_S", None)
+VT = {"on": True}
+def vt_score_coin(sym, market="futures", force_fetch=False):
+    return dict(sym=sym, label="COILING", stage="S1", score=98, price=1.0,
+                vol_tick=VT["on"], flat_run=40, range_w=0.10, pv=-0.05,
+                swing=2.0, events=[], potential=50.0,
+                day_move=0.01, spark=[]), None
+
+monitor.score_coin = vt_score_coin
+CFG2 = dict(market="futures", universe="list", symbols=["AAAUSDT"],
+            scan_interval_minutes=120, digest_hour=8,
+            local_utc_offset_hours=8, request_sleep=0.0, web={})
+mon2 = monitor.Monitor(CFG2, FakeNotifier())
+crashed = False
+try:
+    mon2.run_scan(emit=True)          # fresh state -> prev is None everywhere
+except Exception as e:
+    crashed = True
+    print(f"  crash reproduced: {e}")
+check("baseline crash: run_scan completes with prev=None + vol_tick=True",
+      not crashed)
+check("baseline crash: state file written", os.path.exists(monitor.STATE_PATH))
+st = json.load(open(monitor.STATE_PATH, encoding="utf-8"))
+check("baseline crash: vt_streak recorded as 1",
+      st.get("AAAUSDT", {}).get("vt_streak") == 1)
+check("baseline crash: scan_summary written",
+      mon2.scan_summary.get("ok") == 1)
+
 # ---------- 5. monitor scan budget: round COMPLETES past the deadline ----------
 CALLS = {"n": 0}
 def slow_score_coin(sym, market="futures", force_fetch=False):
@@ -138,11 +176,6 @@ def slow_score_coin(sym, market="futures", force_fetch=False):
 
 monitor.score_coin = slow_score_coin
 os.environ["SCAN_BUDGET_S"] = "1"
-
-class FakeNotifier:
-    def __init__(self): self.sent = []
-    def send(self, title, message, level="info"):
-        self.sent.append((title, level)); return True
 
 CFG = dict(market="futures", universe="list",
            symbols=["AAAUSDT", "BBBUSDT", "CCCUSDT", "DDDUSDT", "EEEUSDT"],
