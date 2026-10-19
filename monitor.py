@@ -444,6 +444,9 @@ class Monitor:
         self.last_scan_iso = now_iso()
         self.stop = False
         self.first_run = True
+        # feed health for outage alerting (True = last round had data; the
+        # first failing round alerts, then stays quiet until recovery)
+        self._feed_was_ok = True
 
     def _build_universe(self):
         u = self.cfg.get("universe", "curated")
@@ -489,6 +492,22 @@ class Monitor:
         except Exception:
             pass
 
+    def _effective_interval_s(self):
+        """Scan interval in seconds — shortened after a TOTAL data outage.
+
+        A 0/N scan round (egress IP geo-blocked by Binance after a redeploy,
+        transient ban, ...) must not sit in the dark for a full 2h interval:
+        retry every 20 min until the feed recovers. The dashboard countdown
+        uses this so it never lies about when the next attempt happens.
+        """
+        interval_s = self.scan_interval * 60
+        try:
+            if (self.scan_summary or {}).get("ok") == 0:
+                interval_s = min(interval_s, 20 * 60)
+        except Exception:
+            pass
+        return interval_s
+
     def next_scan_epoch(self, last_scan_ts=None):
         try:
             if last_scan_ts is None:
@@ -496,7 +515,7 @@ class Monitor:
             base = datetime.fromisoformat(last_scan_ts).timestamp()
         except Exception:
             base = time.time()
-        return int(base + self.scan_interval * 60)
+        return int(base + self._effective_interval_s())
 
     # ---- web dashboard ----
     def write_dashboard(self):
@@ -716,7 +735,11 @@ class Monitor:
         except Exception as e:
             print(f"[timing] watch badges skipped: {e}")
         self.save_state(state_out)
-        self.last_ranked = ranked
+        if n_ok > 0 or not self.last_ranked:
+            self.last_ranked = ranked
+        # else: total data outage — keep the LAST GOOD watchlist on the
+        # dashboard (the 0/N failure banner is driven by scan_summary.ok),
+        # don't blank the tables just because the feed died this round
         self.last_scan_iso = now_iso()
         self.scan_summary = {
             "attempted": len(self.universe),
@@ -733,6 +756,42 @@ class Monitor:
             pass
         dt = time.time() - t0
         print(f"[scan] done: {n_ok}/{len(self.universe)} ok, {dt:.0f}s, {len(new_signals)} new signals")
+        # ---- total-outage handling: diagnostics + one alert per episode ----
+        # The 2026-10-19 incident: redeploy landed the service on an egress
+        # IP Binance refuses; every round came back 0/519 and the user only
+        # found out because the Telegram went quiet. The feed must speak up.
+        if n_ok == 0:
+            conn = {}
+            try:
+                from memecoin_scanner import connectivity_check
+                conn = connectivity_check(market=self.market)
+                print(f"[scan] connectivity: {conn}")
+            except Exception as e:
+                print(f"[scan] connectivity check failed: {e}")
+            if getattr(self, "_feed_was_ok", True):
+                self._feed_was_ok = False
+                try:
+                    self.notifier.send(
+                        "🔴 数据断流 · 全池拉取失败",
+                        f"本轮扫描 0/{len(self.universe)} 个币成功，Binance 行情从部署服务器不可达。\n"
+                        f"连通性探测：{conn or '探测失败'}\n"
+                        "看板继续显示上一轮良好数据；系统改为每 20 分钟重试。\n"
+                        "修复路径：Zeabur 重启服务（换出口 IP）→ 仍失败则设置 HTTPS_PROXY 环境变量"
+                        "（指向 Binance 友好区域的代理）或切换部署区域。",
+                        level="alert")
+                except Exception as e:
+                    print(f"[scan] outage alert failed: {e}")
+        elif not getattr(self, "_feed_was_ok", True):
+            self._feed_was_ok = True
+            try:
+                self.notifier.send(
+                    "🟢 数据恢复",
+                    f"行情拉取恢复正常（本轮 {n_ok}/{len(self.universe)} 个币成功）。恢复正常扫描节奏。",
+                    level="alert")
+            except Exception as e:
+                print(f"[scan] recovery alert failed: {e}")
+        else:
+            self._feed_was_ok = True
         # ambush self-learning loop: record fired AMBUSH calls, then refresh
         # outcome tracking (prices / status transitions) for every open entry
         try:
@@ -1044,7 +1103,9 @@ class Monitor:
         last_digest_date = None
         while not self.stop:
             now = time.time()
-            if now - last_scan >= self.scan_interval * 60:
+            # fast retry after a total data outage (egress IP blocked after a
+            # redeploy, transient ban) — don't sit in the dark for 2 hours
+            if now - last_scan >= self._effective_interval_s():
                 self.run_scan(emit=True)
                 last_scan = now
             local = self.utc_to_local(now)
