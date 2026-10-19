@@ -13,6 +13,10 @@
         （AMBUSH 类信号有双重防抖：①vol_tick 需连续两轮扫描确认（4h K 被 2h 扫描
           采样两次会闪烁）；②该币已有活跃埋伏追踪 entry 时不再重发——与追踪器的
           每币单条去重对齐，防止刷屏）
+        🎯 TP     埋伏闭环：命中启动 / 峰值达标（+30% 第一档止盈、+80% 大赢区）
+        🏁 OUT    埋伏闭环：收官（大赢/赢/弱/未走远/破位止损/45天超时）
+        （TP/OUT 只对真实信号（live）推送——回填是历史重放，不是你的仓位；
+          日报开头另有「📈 战报」栏目汇总近 7 天真实信号的结果）
         ⚠️ TOP     4h 插针见顶 -> 至少减一半
         📉 MA25    放量跌破 4h MA25 -> 再减一半 (规则#6)
         🚪 MA99    跌破 4h MA99 -> 全部离场 (规则#7)
@@ -51,8 +55,153 @@ DATA = os.path.join(HERE, "data")
 
 SIG_EMOJI = {"ENTER": "🚀", "DIP": "💧", "AMBUSH": "🔥", "TOP": "⚠️",
              "MA25": "📉", "MA99": "🚪", "CRASH": "🩸", "BOUNCE": "↩️",
-             "AMBUSH_LITE": "🔵"}
-SIG_ORDER = ["ENTER", "AMBUSH", "AMBUSH_LITE", "DIP", "TOP", "MA25", "MA99", "CRASH", "BOUNCE"]
+             "AMBUSH_LITE": "🔵", "TP": "🎯", "OUT": "🏁"}
+SIG_ORDER = ["ENTER", "TP", "AMBUSH", "AMBUSH_LITE", "OUT", "DIP", "TOP", "MA25", "MA99", "CRASH", "BOUNCE"]
+
+_STATUS_SHORT = {"pre_fail": "破位-20%", "timeout": "45天超时",
+                 "miss": "启动未走远", "weak": "弱+10%"}
+
+
+# ----------------------------------------------------------------------------
+# outcome-feedback helpers: connect ambush CALLS to their RESULTS, so the
+# user is pushed the closed loop (埋伏 -> 启动命中 -> 达标止盈 -> 收官/止损)
+# instead of an endless firehose of fresh recommendations with no follow-up.
+# ----------------------------------------------------------------------------
+def _fmt_pct(g):
+    return f"{g*100:+.0f}%" if isinstance(g, (int, float)) else "—"
+
+
+def enter_hit_note(entry):
+    """Append to an ENTER message when the coin carries an open ambush call."""
+    ep = entry.get("entry_price") or 0.0
+    day = (entry.get("ts") or "")[:10]
+    delay = entry.get("launch_delay_d")
+    lp = entry.get("last_price")
+    g = (lp / ep - 1) if (isinstance(lp, (int, float)) and ep) else None
+    d_s = f"，等了 {delay} 天" if isinstance(delay, (int, float)) else ""
+    g_s = f"，现价 {_fmt_pct(g)} vs 入场" if g is not None else ""
+    return (f"\n🎯 命中：你在 {day} 收到的埋伏信号启动了{d_s}{g_s}。"
+            f"入场价 {ep:.6g}——按剧本做 S3 洗盘后 S3→S4 主升。")
+
+
+def reentry_note(prev):
+    """Append to an AMBUSH message when this coin had a prior (final) episode."""
+    try:
+        import ambush_tracker as _at
+        cn = _at.STATUS_CN.get(prev.get("status"), prev.get("status"))
+    except Exception:
+        cn = prev.get("status")
+    pg = prev.get("peak_gain")
+    day = (prev.get("final_ts") or prev.get("ts") or "")[:10]
+    src = "" if prev.get("source") == "live" else "（回填战绩）"
+    pgs = f"，峰值 {_fmt_pct(pg)}" if isinstance(pg, (int, float)) else ""
+    return (f"\n♻️ 重入：该币上一轮埋伏（{day}）= {cn}{pgs}{src}。"
+            f"同币新周期重复启动历史上贡献了最大复利——值得比新面孔多一分信任。")
+
+
+def outcome_event_signal(evd):
+    """(level, msg) for a tracker outcome event, or (None, None) to skip."""
+    sym = evd.get("sym")
+    if evd.get("ev") == "launched":
+        g = evd.get("gain")
+        return ("TP",
+                f"{sym} 🎯 埋伏命中启动：{evd.get('day')} 的信号等了 "
+                f"{evd.get('delay_d')} 天终于启动。\n"
+                f"入场 {evd.get('entry_price'):.6g} → 启动价 {evd.get('launched_price'):.6g}"
+                f"（{_fmt_pct(g)}）。按剧本：S3 洗盘别丢仓位，S3→S4 主升。")
+    if evd.get("ev") == "milestone":
+        lvl = evd.get("level")
+        tag = "第一档止盈区（+30%）" if lvl == 0.30 else "大赢区（+80%）"
+        return ("TP",
+                f"{sym} 🎯 埋伏达标：峰值 {_fmt_pct(evd.get('gain'))}，进入{tag}。\n"
+                f"止盈阶梯参考：+50% 卖 1/3、+100% 再卖 1/3、剩余移动止损。"
+                + ("" if lvl == 0.30 else "这已经是 win_strong 级别的走势。"))
+    if evd.get("ev") == "final":
+        st = evd.get("status")
+        pg = evd.get("peak_gain")
+        try:
+            import ambush_tracker as _at
+            cn = _at.STATUS_CN.get(st, st)
+        except Exception:
+            cn = st
+        if st in ("win_strong", "win", "weak"):
+            return ("OUT",
+                    f"{sym} 🏁 埋伏收官：{cn}，峰值 {_fmt_pct(pg)}。\n"
+                    f"（{evd.get('day')} 入场的信号已走完启动后 20 天窗口）")
+        if st == "miss":
+            return ("OUT",
+                    f"{sym} 🏁 埋伏收官：启动了但没走远（峰值 {_fmt_pct(pg)}）。\n"
+                    f"这类启动弱于剧本，S4 主升没来。")
+        if st == "pre_fail":
+            return ("OUT",
+                    f"{sym} 🏁 埋伏止损：启动前跌破 -20%（{evd.get('day')} 入场的信号）。\n"
+                    f"-20% 破位止损执行，等它重新横盘会自动再评估。")
+        if st == "timeout":
+            return ("OUT",
+                    f"{sym} 🏁 埋伏超时：45 天未启动（峰值仅 {_fmt_pct(pg)}）。\n"
+                    f"横盘是死水不是蓄力，撤。")
+    return None, None
+
+
+def battle_report_lines(entries, days=7, now=None):
+    """战报 section for the daily digest: what happened to previous live
+    ambush calls (launches / finals in the window, current best peaks,
+    cumulative live record). Returns [] when there is nothing to report."""
+    now = now or now_iso()
+    try:
+        t_now = datetime.fromisoformat(now)
+    except Exception:
+        t_now = datetime.now(timezone.utc)
+    live = [e for e in (entries or []) if e.get("source") == "live"]
+    if not live:
+        return []
+    def _inwin(ts):
+        try:
+            return (t_now - datetime.fromisoformat(ts)).days <= days
+        except Exception:
+            return False
+    launched = [e for e in live if e.get("launched_ts") and _inwin(e["launched_ts"])]
+    finals = [e for e in live if e.get("final_ts") and _inwin(e["final_ts"])]
+    open_l = [e for e in live if e["status"] == "launched"]
+    lines = [f"📈 战报（近 {days} 天，真实信号闭环）："]
+    if launched:
+        parts = []
+        for e in sorted(launched, key=lambda x: x["launched_ts"]):
+            ep = e.get("entry_price") or 0
+            lp = e.get("last_price")
+            g = (lp / ep - 1) if (isinstance(lp, (int, float)) and ep) else None
+            parts.append(f"{e['sym']}（等{e.get('launch_delay_d')}天，现{_fmt_pct(g)}）")
+        lines.append("  启动命中：" + "、".join(parts))
+    if open_l:
+        best = sorted(open_l, key=lambda e: -((e.get("max_price") or e.get("entry_price") or 1)
+                                              / (e.get("entry_price") or 1) - 1))
+        parts = []
+        for e in best[:6]:
+            ep = e.get("entry_price") or 0
+            g = ((e.get("max_price") or ep) / ep - 1) if ep else None
+            parts.append(f"{e['sym']} 峰值{_fmt_pct(g)}")
+        lines.append("  启动后跟踪中：" + "、".join(parts)
+                     + ("…" if len(best) > 6 else ""))
+    if finals:
+        wins = [e for e in finals if e["status"] in ("win_strong", "win")]
+        losses = [e for e in finals if e["status"] in ("pre_fail", "timeout", "miss", "weak")]
+        if wins:
+            parts = [f"{e['sym']} {_fmt_pct(e.get('peak_gain'))}" for e in wins]
+            lines.append("  ✅ 收官赢：" + "、".join(parts))
+        if losses:
+            parts = [f"{e['sym']}（{_STATUS_SHORT.get(e['status'], e['status'])}）"
+                     for e in losses]
+            lines.append("  ❌ 收官撤：" + "、".join(parts))
+    # cumulative live record
+    lf = [e for e in live if e["status"] in ("win_strong", "win", "weak", "miss")]
+    w30 = [e for e in lf if (e.get("peak_gain") or 0) >= 0.30]
+    n_fin = sum(1 for e in live if e.get("final_ts"))
+    cum = (f"  累计（真实信号）：{len(live)} 笔 · 已启动 {len(lf) + sum(1 for e in live if e['status'] == 'launched')}"
+           f" · 启动后+30%达标 {len(w30)}/{len(lf) if lf else 0}")
+    lines.append(cum + (f" · 已收官 {n_fin}" if n_fin else ""))
+    if len(lines) == 1:
+        lines.append("  （真实信号都还在等待窗内，尚无结果——首笔结果出来就会出现在这里）")
+    return lines
 
 DEFAULT_CONFIG = {
     "market": "futures",
@@ -506,12 +655,15 @@ class Monitor:
         # coins already being tracked: a re-fire carries no new information
         # (the tracker keeps ONE active entry per coin), so don't spam
         # Telegram / the signals log with vol_tick flicker re-fires.
-        tracked_syms = set()
+        # tracked_map additionally powers ENTER augmentation (埋伏命中) and
+        # last_final powers the ♻️ re-entry annotation on fresh AMBUSH calls.
+        tracked_map, last_final = {}, {}
         try:
             import ambush_tracker
-            tracked_syms = ambush_tracker.active_syms()
+            tracked_map = ambush_tracker.active_map()
+            last_final = ambush_tracker.last_final_map()
         except Exception as e:
-            print(f"[ambush-track] active_syms skipped: {e}")
+            print(f"[ambush-track] active_map skipped: {e}")
         for rec in ranked:
             sym = rec["sym"]
             prev = state.get(sym)
@@ -538,8 +690,12 @@ class Monitor:
             }
             if emit and prev is not None:   # skip signal emission on very first baseline
                 for lvl, msg, ev in signals:
-                    if lvl in ("AMBUSH", "AMBUSH_LITE") and sym in tracked_syms:
+                    if lvl in ("AMBUSH", "AMBUSH_LITE") and sym in tracked_map:
                         continue  # already tracked: re-fire is flicker noise
+                    if lvl == "ENTER" and sym in tracked_map:
+                        msg = msg + enter_hit_note(tracked_map[sym])
+                    elif lvl in ("AMBUSH", "AMBUSH_LITE") and sym in last_final:
+                        msg = msg + reentry_note(last_final[sym])
                     new_signals.append((lvl, sym, msg, ev))
         # entry-timing badges for the watchlist (15m VWAP/EMA gate):
         # coverage is ALL main-tier COILING + FRESH_LAUNCH (the actionable set),
@@ -590,7 +746,14 @@ class Monitor:
                     rec = next((r for r in ranked if r["sym"] == sym), None)
                     if rec is not None:
                         ambush_tracker.record_entry(rec, tier="lite")
-            ambush_tracker.update(ranked)
+            res = ambush_tracker.update(ranked)
+            outcome_events = res[1] if isinstance(res, tuple) else []
+            # push the closed loop: 命中启动 / 达标止盈 / 收官止损 — live
+            # entries only (backfill is history replay, not real calls)
+            for evd in outcome_events or []:
+                lvl, msg = outcome_event_signal(evd)
+                if lvl:
+                    new_signals.append((lvl, evd.get("sym", "?"), msg, None))
         except Exception as e:
             print(f"[ambush-track] skipped: {e}")
         if self.first_run:
@@ -648,6 +811,16 @@ class Monitor:
             _cn = {"bullish": "多头", "bearish": "空头", "neutral": "中性"}.get(rg, rg)
             lines.append(f"大盘点位闸门（BTC 15m VWAP+EMA）：{_cn}"
                          + ("——逆风期，新埋伏减半或推迟" if rg == "bearish" else ""))
+        # battle report FIRST: what happened to previous live calls — the
+        # closed loop must lead the digest, or it drowns under the fresh
+        # recommendation list it is supposed to hold accountable.
+        try:
+            import ambush_tracker
+            br = battle_report_lines(ambush_tracker.load()["entries"])
+            if br:
+                lines += br
+        except Exception as e:
+            print(f"[digest] battle report skipped: {e}")
         lines.append("")
         lines.append("🔥 埋伏观察列表（横盘蓄力，等第一根巨量启动）:")
         if coiling:

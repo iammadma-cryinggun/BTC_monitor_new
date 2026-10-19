@@ -113,8 +113,19 @@ def _is_launched_stage(stage):
 
 def update(ranked, now=None):
     """Called after EVERY scan with the full ranked list: refresh prices,
-    apply status transitions, finalize outcomes. Returns the store."""
+    apply status transitions, finalize outcomes.
+
+    Returns (store, events). events = list of dicts for LIVE entries only
+    (backfill is history replay, not the user's actual signals):
+        {"ev": "launched", "sym", "entry_price", "launched_price", "gain",
+         "delay_d", "day"}
+        {"ev": "milestone", "sym", "level": 0.30|0.80, "gain"}
+        {"ev": "final", "sym", "status", "peak_gain", "day"}
+    The monitor turns these into pushed messages so outcomes reach the user
+    instead of being buried in the JSON store.
+    """
     store = load()
+    events = []
     bysym = {r["sym"]: r for r in (ranked or [])}
     now = now or _now()
     for e in store["entries"]:
@@ -122,6 +133,7 @@ def update(ranked, now=None):
             continue
         rec = bysym.get(e["sym"])
         t0 = datetime.fromisoformat(e["ts"])
+        live = e.get("source") == "live"
         if rec is not None and rec.get("price"):
             p = float(rec["price"])
             e["last_price"] = p
@@ -139,18 +151,44 @@ def update(ranked, now=None):
                 if rec.get("price"):
                     e["launched_price"] = float(rec["price"])
                 e["launch_delay_d"] = round((now - t0).total_seconds() / 86400, 1)
+                if live:
+                    lp = e.get("launched_price") or ep
+                    events.append({"ev": "launched", "sym": e["sym"],
+                                   "entry_price": ep, "launched_price": lp,
+                                   "gain": round(lp / ep - 1, 4),
+                                   "delay_d": e["launch_delay_d"],
+                                   "day": e["ts"][:10]})
             elif e.get("min_price") is not None and e["min_price"] <= ep * (1 + PRE_FAIL):
                 e["status"] = "pre_fail"
                 e["peak_gain"] = round(e["min_price"] / ep - 1, 4)
                 e["final_ts"] = now.isoformat()
+                if live:
+                    events.append({"ev": "final", "sym": e["sym"], "status": "pre_fail",
+                                   "peak_gain": e["peak_gain"], "day": e["ts"][:10]})
             elif (now - t0).days > WAIT_DAYS:
                 e["status"] = "timeout"
                 e["peak_gain"] = round((e.get("max_price") or ep) / ep - 1, 4)
                 e["final_ts"] = now.isoformat()
+                if live:
+                    events.append({"ev": "final", "sym": e["sym"], "status": "timeout",
+                                   "peak_gain": e["peak_gain"], "day": e["ts"][:10]})
         elif e["status"] == "launched":
             tl = datetime.fromisoformat(e["launched_ts"])
             crashed = rec is not None and (rec.get("label") == "CRASHING"
                                            or str(rec.get("stage"))[-1] == "6")
+            if live:
+                # profit-milestone pushes: +30% (first take-profit ladder) and
+                # +80% (win_strong zone). Once-per-entry via e["milestones"].
+                g_now = (e.get("max_price") or ep) / ep - 1
+                noted = list(e.get("milestones") or [])
+                for lvl in (0.30, 0.80):
+                    if g_now >= lvl and lvl not in noted:
+                        noted.append(lvl)
+                        events.append({"ev": "milestone", "sym": e["sym"],
+                                       "level": lvl, "gain": round(g_now, 4),
+                                       "day": e["ts"][:10]})
+                if noted:
+                    e["milestones"] = noted
             if crashed or (now - tl).days > POST_DAYS:
                 peak = e.get("max_price") or ep
                 g = peak / ep - 1
@@ -159,8 +197,11 @@ def update(ranked, now=None):
                                "win" if g >= WIN else
                                "weak" if g >= WEAK else "miss")
                 e["final_ts"] = now.isoformat()
+                if live:
+                    events.append({"ev": "final", "sym": e["sym"], "status": e["status"],
+                                   "peak_gain": e["peak_gain"], "day": e["ts"][:10]})
     save(store)
-    return store
+    return store, events
 
 
 def stats(store=None):
@@ -236,7 +277,38 @@ def active_syms():
     is open adds no information — it's vol_tick flicker between 2h scans
     (observed: 107 re-fires in a single scan round), not a new ambush window.
     """
-    return {e["sym"] for e in load()["entries"] if e["status"] not in FINAL}
+    return set(active_map())
+
+
+def active_map():
+    """sym -> open (not finalized) track entry; the newest entry wins.
+
+    The monitor uses this to (a) suppress re-fires (see active_syms) and
+    (b) AUGMENT the ENTER message of a tracked coin with the ambush call's
+    entry price/date, so the user sees the closed loop: 埋伏信号 -> 启动命中.
+    """
+    m = {}
+    for e in load()["entries"]:
+        if e["status"] not in FINAL:
+            m[e["sym"]] = e          # entries are append-ordered: last wins
+    return m
+
+
+def last_final_map():
+    """sym -> most recent FINAL entry (prior episodes).
+
+    Used to annotate AMBUSH re-entries with the previous round's outcome —
+    same-coin repeat cycles produced the biggest compounded wins in the
+    backfill replay (ONE x3: +599%/+500%/+500%), and the user should see
+    that context AT recommendation time, not in a report weeks later.
+    """
+    m = {}
+    for e in load()["entries"]:
+        if e["status"] in FINAL:
+            cur = m.get(e["sym"])
+            if cur is None or (e.get("ts") or "") > (cur.get("ts") or ""):
+                m[e["sym"]] = e
+    return m
 
 
 # ----------------------------------------------------------------------------
