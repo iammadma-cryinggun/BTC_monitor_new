@@ -715,6 +715,25 @@ class Monitor:
         # used to decide who got OI. Coinalyze batches 20 symbols per
         # request; Binance per-coin calls backstop whatever it misses.
         self._deriv_pass(ranked, offline=offline)
+        # ---- tracker bootstrap BEFORE anything evidence-dependent reads it.
+        # (2026-10-20 12:47 incident) on the first scan after a restart with a
+        # lost/empty tracker, backfill used to run at the END of run_scan —
+        # AFTER the re-entry annotations, the AMBUSH launch-window note and
+        # the evidence attach had already read an EMPTY tracker. The initial
+        # digest (which recomputes value_board from the tracker after the
+        # backfill) then showed "第4轮重入" conclusions while the dashboard —
+        # fed by ev fields attached BEFORE the backfill — said "新面孔·无战
+        # 绩" for the same coins in the same scan. This scan has just written
+        # the kline CSVs, so backfill here and every consumer below (tracked_
+        # map / last_final / ambush_note / attach_evidence / the digest)
+        # sees the full history from the very first scan.
+        if self.first_run:
+            try:
+                import ambush_tracker
+                if not ambush_tracker.load()["entries"]:
+                    ambush_tracker.backfill(market=self.market, quiet=True)
+            except Exception as e:
+                print(f"[ambush-backfill] early bootstrap skipped: {e}")
         # ---- signal classification (second pass, after derivatives so
         # AMBUSH / ENTER messages can quote the full context) ----
         # coins already being tracked: a re-fire carries no new information
@@ -903,9 +922,11 @@ class Monitor:
             print(f"[ambush-track] skipped: {e}")
         if self.first_run:
             self.first_run = False
-            # bootstrap historical stats from the cached klines once (store is
-            # empty) — gives the win-rate dashboard an initial sample instead
-            # of starting from zero after every redeploy
+            # fallback bootstrap — the EARLY one (right after the derivatives
+            # pass, before evidence attach) normally already ran; kept for the
+            # case where that one failed (e.g. no kline CSVs yet). Gives the
+            # win-rate dashboard an initial sample instead of starting from
+            # zero after every redeploy.
             try:
                 import ambush_tracker
                 if not ambush_tracker.load()["entries"]:
