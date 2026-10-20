@@ -708,15 +708,20 @@ class DashboardServer:
                 the user keeps local downloads of it and pushes them back
                 through this endpoint.
 
-                POST /restore_track[?force=1]
+                POST /restore_track[?force=1|?merge=1]
                   header  X-Restore-Token: <RESTORE_TOKEN env var>
                   body    raw JSON {"entries":[...]} (an ambush_track.json)
                 Guards: token must match RESTORE_TOKEN (endpoint disabled
                 entirely when unset); a NON-empty existing tracker is refused
-                unless ?force=1; body must parse and carry entries.
+                unless ?force=1 (overwrite) or ?merge=1 (union — entries are
+                merged by (sym, ts, source) so a backup of OLD live calls can
+                be folded into a tracker that self-refilled with a fresh
+                backfill without losing either side); body must parse and
+                carry entries.
                 """
                 path, _, qs = self.path.partition("?")
                 force = "force=1" in qs
+                merge = "merge=1" in qs
                 if path != "/restore_track":
                     self._reply_json(404, {"ok": False, "error": "unknown POST route"})
                     return
@@ -736,7 +741,7 @@ class DashboardServer:
                     if not isinstance(entries, list) or not entries:
                         raise ValueError("body has no entries")
                     cur = os.path.join(data_dir, "ambush_track.json")
-                    if os.path.exists(cur) and not force:
+                    if os.path.exists(cur) and not force and not merge:
                         try:
                             with open(cur, encoding="utf-8") as f:
                                 n_cur = len(json.load(f).get("entries") or [])
@@ -745,7 +750,25 @@ class DashboardServer:
                         if n_cur > 0:
                             self._reply_json(409, {"ok": False,
                                                    "error": f"tracker non-empty ({n_cur} entries); "
-                                                            f"add ?force=1 to overwrite"})
+                                                            f"add ?force=1 to overwrite or ?merge=1 to union"})
+                            return
+                    if merge and os.path.exists(cur):
+                        try:
+                            with open(cur, encoding="utf-8") as f:
+                                existing = json.load(f)
+                            if not isinstance(existing, dict):
+                                existing = {"entries": []}
+                            key = lambda e: (e.get("sym", ""), e.get("ts", ""), e.get("source", ""))
+                            have = {key(e) for e in (existing.get("entries") or [])}
+                            added = [e for e in entries if key(e) not in have]
+                            store = dict(existing)
+                            store["entries"] = (existing.get("entries") or []) + added
+                            entries = store["entries"]
+                            print(f"[restore] merge: {len(added)} new entries folded in, "
+                                  f"{len(have)} existing kept")
+                        except Exception as e:
+                            self._reply_json(500, {"ok": False,
+                                                   "error": f"merge failed: {e}"})
                             return
                     tmp = cur + ".tmp"
                     with open(tmp, "w", encoding="utf-8") as f:

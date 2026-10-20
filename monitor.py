@@ -63,6 +63,15 @@ SIG_EMOJI = {"ENTER": "🚀", "DIP": "💧", "AMBUSH": "🔥", "TOP": "⚠️",
              "AMBUSH_LITE": "🔵", "TP": "🎯", "OUT": "🏁"}
 SIG_ORDER = ["ENTER", "TP", "AMBUSH", "AMBUSH_LITE", "OUT", "DIP", "TOP", "MA25", "MA99", "CRASH", "BOUNCE"]
 
+# event-keyed signal levels: their identity is (sym, event_sig) — these get the
+# persistent fired-event memory so a detection-window flicker can never re-fire
+# an already-alerted event. Transition-based levels (AMBUSH/TP/OUT) dedup by
+# their own state machines instead.
+EVENT_LEVELS = {"ENTER", "DIP", "TOP", "MA25", "MA99", "CRASH", "BOUNCE"}
+# how long a fired event is remembered (days) — a bar can only produce the same
+# event key once, so this is purely a memory bound
+FIRED_EVENT_TTL_DAYS = 14
+
 _STATUS_SHORT = {"pre_fail": "破位-20%", "timeout": "45天超时",
                  "miss": "启动未走远", "weak": "弱+10%"}
 
@@ -601,6 +610,18 @@ class Monitor:
     def run_scan(self, emit=True):
         state = self.load_state()
         state_out = dict(state)
+        # persistent fired-event memory: {sym|EVENTSIG: fired_iso}. Events on
+        # closed bars flicker in/out of the detection window (each new 4h bar
+        # reshuffles it), and event_sigs alone could not stop identical
+        # re-fires — observed 300+ duplicate messages per day. This map is the
+        # authoritative "already alerted" ledger.
+        fired = state.get("_fired_events")
+        if not isinstance(fired, dict):
+            fired = {}
+        else:
+            cut = time.time() - FIRED_EVENT_TTL_DAYS * 86400
+            fired = {k: v for k, v in fired.items()
+                     if isinstance(v, str) and datetime.fromisoformat(v).timestamp() > cut}
         ranked = []
         new_signals = []
         t0 = time.time()
@@ -741,6 +762,16 @@ class Monitor:
                 for lvl, msg, ev in signals:
                     if lvl in ("AMBUSH", "AMBUSH_LITE") and sym in tracked_map:
                         continue  # already tracked: re-fire is flicker noise
+                    # fired-event memory: an event that already alerted (within
+                    # the TTL) NEVER fires again, even if the detection window
+                    # flickers it out of event_sigs and back in (each 4h bar
+                    # open reshuffles the window; event_sigs alone let the SAME
+                    # MA25/MA99/WICKTOP re-fire every 4h — 300+ dupes/day).
+                    if lvl in EVENT_LEVELS and isinstance(ev, dict):
+                        ekey = f"{sym}|{event_sig(ev)}"
+                        if ekey in fired:
+                            continue
+                        fired[ekey] = now_iso()
                     if lvl == "ENTER" and sym in tracked_map:
                         msg = msg + enter_hit_note(tracked_map[sym])
                     elif lvl in ("AMBUSH", "AMBUSH_LITE") and sym in last_final:
@@ -764,6 +795,8 @@ class Monitor:
                     r["timing"] = t
         except Exception as e:
             print(f"[timing] watch badges skipped: {e}")
+        # persist the fired-event ledger with the rest of the state
+        state_out["_fired_events"] = fired
         self.save_state(state_out)
         if n_ok > 0 or not self.last_ranked:
             self.last_ranked = ranked
@@ -859,9 +892,35 @@ class Monitor:
             if emit:
                 self.run_digest()  # give an initial overview on first baseline
         if emit:
+            # Telegram flood control (2026-10-20 incident: a market-wide dump
+            # produced 1016 individual messages in 24h — 99% low-value event
+            # notes, many literally identical to ones sent hours earlier).
+            # Actionable signals (AMBUSH / ENTER / TP / OUT) still go out
+            # individually (ENTER capped at 8 per scan); everything else is
+            # folded into ONE compact per-scan digest. The web signals log
+            # keeps every entry individually — only Telegram is batched.
+            BATCHED_LEVELS = ("DIP", "TOP", "MA25", "MA99", "CRASH", "BOUNCE")
+            n_enter = 0
+            batch_lines = []
             for lvl, sym, msg, ev in new_signals:
                 self.log_signal(lvl, sym, msg, ev=ev["type"] if isinstance(ev, dict) else None)
+                first_line = msg.split("\n")[0]
+                short = first_line if len(first_line) <= 80 else first_line[:80] + "…"
+                if lvl in BATCHED_LEVELS or (lvl == "ENTER" and n_enter >= 8):
+                    batch_lines.append(f"· {short}")
+                    continue
+                if lvl == "ENTER":
+                    n_enter += 1
                 self.notifier.send(f"{SIG_EMOJI.get(lvl,'')} {lvl} 信号 · {sym}", msg, level=lvl)
+            if batch_lines:
+                shown = batch_lines[:40]
+                extra = len(batch_lines) - len(shown)
+                body = "\n".join(shown) + (f"\n…另有 {extra} 条（详见看板信号流）" if extra > 0 else "")
+                self.notifier.send(
+                    "📋 事件速览（本轮合并）",
+                    f"低优先级事件 {len(batch_lines)} 条，已合并推送：\n{body}\n\n"
+                    "（洗盘/插针/破位类事件不再逐条打扰；看板信号流保留全量明细）",
+                    level="info")
         self.write_dashboard()
         return ranked
 
