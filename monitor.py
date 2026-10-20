@@ -22,7 +22,8 @@
         🚪 MA99    跌破 4h MA99 -> 全部离场 (规则#7)
         🩸 CRASH   崩盘 -> 别接刀
         ↩️ BOUNCE  崩后巨量反弹 -> 阶段6不是底，别追
-  - 每天本地 digest_hour 点推送「当日埋伏观察列表」(哪些币值得盯)
+  - 每天本地 digest_hour 点推送「当日结论摘要」：价值榜（按历史战绩/燃料/
+    点位排序的埋伏候选 TOP5）+ 在途埋伏老化结论 + 战报（推荐明细看板/命令里有）
 
 防封策略:
   - 只访问公开行情 klines（无需 API key，权重极低）
@@ -728,6 +729,16 @@ class Monitor:
             last_final = ambush_tracker.last_final_map()
         except Exception as e:
             print(f"[ambush-track] active_map skipped: {e}")
+        # historical launch-window conclusion (from the tracker's accumulated
+        # outcomes) — appended to every fresh AMBUSH push so each call carries
+        # its own base-rate evidence instead of being a bare recommendation.
+        ambush_note = ""
+        try:
+            import ambush_tracker, insights
+            ambush_note = insights.launch_window_note(
+                insights.launch_window_stats(ambush_tracker.load()["entries"]))
+        except Exception as e:
+            print(f"[insights] launch-window note skipped: {e}")
         for rec in ranked:
             sym = rec["sym"]
             prev = state.get(sym)
@@ -776,6 +787,8 @@ class Monitor:
                         msg = msg + enter_hit_note(tracked_map[sym])
                     elif lvl in ("AMBUSH", "AMBUSH_LITE") and sym in last_final:
                         msg = msg + reentry_note(last_final[sym])
+                    if lvl in ("AMBUSH", "AMBUSH_LITE") and ambush_note:
+                        msg = msg + ambush_note
                     new_signals.append((lvl, sym, msg, ev))
         # entry-timing badges for the watchlist (15m VWAP/EMA gate):
         # coverage is ALL main-tier COILING + FRESH_LAUNCH (the actionable set),
@@ -969,77 +982,40 @@ class Monitor:
                 lines += br
         except Exception as e:
             print(f"[digest] battle report skipped: {e}")
+        # ---- conclusion-driven core (2026-10-20 feedback: "我需要类似的结论，
+        # 而不是大量的推荐——这样我才能找到有价值的标的埋伏") ----
+        # The raw 18-row watchlist / lite / fresh / launched / risk tables now
+        # live on the dashboard + /ambush + /value; the digest leads with what
+        # the EVIDENCE says: which candidates are worth ambushing (value board
+        # ranked by historical re-entry record, squeeze fuel, entry timing),
+        # which open calls are aging into statistical dead water, and one
+        # compact line for everything else.
+        n_board, n_cands = 0, len(coiling)
+        try:
+            import ambush_tracker, insights
+            _store = ambush_tracker.load()
+            _lw = insights.launch_window_stats(_store["entries"])
+            _rows, n_cands = insights.value_board(ranked, _store["entries"])
+            n_board = len(_rows)
+            if _rows:
+                lines.append("")
+                lines += insights.board_lines(_rows, n_cands, _lw)
+            _ag = insights.aging_lines(_store["entries"], lw=_lw)
+            if _ag:
+                lines.append("")
+                lines += _ag
+        except Exception as e:
+            print(f"[digest] insights skipped: {e}")
+        # everything else: counts + the actionable names only; details live
+        # on the web dashboard and via the Telegram /ambush command
+        lite = [r for r in ranked if r["label"] == "COILING_LITE"]
         lines.append("")
-        lines.append("🔥 埋伏观察列表（横盘蓄力，等第一根巨量启动）:")
-        if coiling:
-            for r in coiling[:18]:
-                star = "★" if r.get("vol_tick") else " "
-                tm = r.get("timing") or {}
-                tmk = "⚡" if tm.get("ready") else ("✋" if tm else " ")
-                pv = r.get("pv")
-                pv_s = f"{pv*100:+.0f}%" if pv is not None else "n/a"
-                m1 = r.get("ma99_1h")
-                pv1 = (r["price"] / m1 - 1.0) if (isinstance(m1, (int, float)) and m1 > 0) else None
-                pv1_s = f"{pv1*100:+.1f}%" if pv1 is not None else "—"
-                fd = r.get("funding"); oc = r.get("oi_chg_24h")
-                dv = []
-                if isinstance(fd, (int, float)):
-                    dv.append(f"费率{fd*100:+.3f}%")
-                if isinstance(oc, (int, float)):
-                    dv.append(f"OI{oc*100:+.0f}%")
-                dv_s = ("  " + "·".join(dv)) if dv else ""
-                lines.append(f"  {star}{tmk} {r['sym']:<12} 潜力{r.get('potential',0):.0f} 分{r['score']:.0f}  价{r['price']:.6g}  "
-                             f"区间{r['range_w']*100:.1f}%  量能{'抬头' if r.get('vol_tick') else '静'}  "
-                             f"vsMA99 {pv_s}  1hM99 {pv1_s}{dv_s}")
-            lines.append("  （⚡=15m 点位就绪：价>VWAP 且 EMA9>20；✋=未就绪。只盯 ⚡ 打仓位）")
-        else:
-            lines.append("  （暂无）")
-        lines.append("")
-        # secondary tier: fresh-cycle large caps (below the 妖币 amplitude gate)
-        lite = sorted([r for r in ranked if r["label"] == "COILING_LITE"],
-                      key=lambda r: -r.get("potential", r.get("score", 0)))
-        lines.append("🔵 次级蓄力（大盘币新周期横盘，仓位小于主档；振幅未达妖币门槛）:")
-        if lite:
-            for r in lite[:5]:
-                star = "★" if r.get("vol_tick") else " "
-                pv = r.get("pv")
-                pv_s = f"{pv*100:+.0f}%" if pv is not None else "n/a"
-                fd = r.get("funding"); oc = r.get("oi_chg_24h")
-                dv = []
-                if isinstance(fd, (int, float)):
-                    dv.append(f"费率{fd*100:+.3f}%")
-                if isinstance(oc, (int, float)):
-                    dv.append(f"OI{oc*100:+.0f}%")
-                dv_s = ("  " + "·".join(dv)) if dv else ""
-                lines.append(f"  {star} {r['sym']:<12} 潜力{r.get('potential',0):.0f} 分{r['score']:.0f}  价{r['price']:.6g}  "
-                             f"横盘{r.get('flat_run')}根  区间{r['range_w']*100:.1f}%  "
-                             f"振幅{r.get('swing',0)*100:.0f}%  vsMA99 {pv_s}{dv_s}")
-        else:
-            lines.append("  （暂无）")
-        lines.append("")
-        lines.append("⚡ 近期启动（做 S3→S4）:")
+        rest = (f"其余观察（明细看网页看板或发 /ambush）：次级蓄力 {len(lite)} · "
+                f"刚启动 {len(fresh)} · 动能衰减 {len(launched)} · 警惕 {len(risk)}")
         if fresh:
-            for r in fresh:
-                m1 = r.get("ma99_1h")
-                pv1 = (r["price"] / m1 - 1.0) if (isinstance(m1, (int, float)) and m1 > 0) else None
-                pv1_s = f"1hM99 {pv1*100:+.1f}%  " if pv1 is not None else ""
-                lines.append(f"  {r['sym']:<12} S{r['stage'][-1]}  价{r['price']:.6g}  {pv1_s}{r['reason']}")
-        else:
-            lines.append("  （暂无）")
-        if launched:
-            lines.append("")
-            lines.append("👀 已启动动能衰减（按启动先后排列，可关注是否再洗盘）:")
-            for r in launched[:8]:
-                rec = r.get("launch_recency")
-                rec_s = f"{rec}根4h前" if isinstance(rec, int) else "?"
-                lines.append(f"  {r['sym']:<12} 价{r['price']:.6g}  启动于{rec_s}  {r['reason']}")
-        if risk:
-            lines.append("")
-            lines.append("⚠️ 需警惕（已拉完/崩盘，别接刀；按近1日振幅排序）:")
-            for r in risk[:10]:
-                dm = r.get("day_move")
-                dm_s = f"{dm*100:+.1f}%" if isinstance(dm, (int, float)) else "—"
-                lines.append(f"  {r['sym']:<12} {r['label']} 价{r['price']:.6g}  ~1日{dm_s}")
+            names = "、".join(r["sym"] for r in fresh[:3])
+            rest += f"；刚启动（做 S3→S4）：{names}" + ("…" if len(fresh) > 3 else "")
+        lines.append(rest)
         lines.append("")
         lines.append("信号会通过本渠道实时推送。手动交易，纪律第一。")
         # ambush self-review: measure our own AMBUSH calls (the self-learning loop)
@@ -1070,7 +1046,8 @@ class Monitor:
             print(f"[ambush-digest] skipped: {e}")
         text = "\n".join(lines)
         self.notifier.send(f"📅 每日妖币监控 · {date}", text, level="digest")
-        self.log_signal("DIGEST", "", f"每日摘要 · 监控 {len(ranked)} 币 · 埋伏 {len(coiling)} · 刚启动 {len(fresh)}")
+        self.log_signal("DIGEST", "",
+                        f"每日摘要 · 监控 {len(ranked)} 币 · 价值榜 {n_board}/{n_cands} · 刚启动 {len(fresh)}")
         # also save full HTML for reference
         try:
             from memecoin_scanner import build_html

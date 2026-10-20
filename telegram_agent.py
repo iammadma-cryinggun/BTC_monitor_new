@@ -14,7 +14,8 @@ facts stay tool-served).
 Commands (slash or natural language):
   /help 帮助                  — this list
   /status 状态                — scan summary / pool / label counts
-  /ambush 埋伏列表            — current ambush watch list
+  /value 价值榜/值得埋谁       — EVIDENCE-ranked ambush board + aging verdicts
+  /ambush 埋伏列表            — current ambush watch list (raw, full)
   /track [SYM] 追踪/复盘/胜率 — ambush tracker stats, or one symbol's calls
   /check SYM                  — live re-score + "还能埋伏吗" verdict
   "<SYM> 还能埋伏吗 / 怎么样" — same as /check
@@ -25,6 +26,7 @@ import urllib.request, urllib.error
 from datetime import datetime, timezone
 
 import ambush_tracker
+import insights
 from memecoin_scanner import score_coin, fetch_funding_all, fetch_oi_change
 
 SYM_RE = re.compile(r"\b([A-Z0-9]{2,18}USDT)\b")
@@ -32,8 +34,9 @@ SYM_RE = re.compile(r"\b([A-Z0-9]{2,18}USDT)\b")
 HELP = (
     "🤖 妖币监控 · 问答模式\n"
     "直接发消息问我（只读，不代下单）：\n\n"
+    "/value 或 价值榜/值得埋谁 — 结论版：按历史战绩排序的价值榜+老化提醒\n"
     "/status 或 状态 — 扫描概况\n"
-    "/ambush 或 埋伏列表 — 当前埋伏候选\n"
+    "/ambush 或 埋伏列表 — 当前埋伏候选（全量原始列表）\n"
     "/track 或 追踪/复盘 — 埋伏信号自检统计\n"
     "/track BANKUSDT — 该币历次埋伏追踪明细\n"
     "/check BANKUSDT — 实时重扫该币 + 还能埋伏吗判定\n"
@@ -185,6 +188,8 @@ class TelegramAgent:
             cmd, args = parts[0].split("@")[0].lower(), parts[1:]
             if cmd == "/status":
                 return self.ans_status()
+            if cmd == "/value":
+                return self.ans_value()
             if cmd == "/ambush":
                 return self.ans_ambush()
             if cmd == "/track":
@@ -201,6 +206,8 @@ class TelegramAgent:
             return self.ans_invalid(sym)
         if sym:
             return self.ans_check(sym)
+        if any(k in t for k in ("价值", "值得", "推荐", "结论", "埋谁", "该埋")):
+            return self.ans_value()
         if any(k in t for k in ("追踪", "复盘", "胜率", "自检")):
             return self.ans_track(None)
         if "埋伏" in t or "候选" in t:
@@ -241,6 +248,27 @@ class TelegramAgent:
             lines.append(f"标签分布：{seg}")
         if not rk:
             lines.append("（本轮还没有扫描数据）")
+        return "\n".join(lines)
+
+    def ans_value(self):
+        """Conclusion board: EVIDENCE-ranked ambush candidates + aging
+        verdicts — the "which targets are actually worth ambushing" answer,
+        as opposed to the raw /ambush list."""
+        rk = self.monitor.last_ranked or []
+        if not rk:
+            return "本轮还没有扫描数据，稍后再问（或发 /status 看扫描状态）。"
+        entries = ambush_tracker.load()["entries"]
+        lw = insights.launch_window_stats(entries)
+        rows, n_cands = insights.value_board(rk, entries)
+        if not rows:
+            return "当前没有横盘蓄力（COILING）候选，价值榜为空。刚启动的币发 /ambush 看全量。"
+        lines = insights.board_lines(rows, n_cands, lw)
+        ag = insights.aging_lines(entries, lw=lw)
+        if ag:
+            lines.append("")
+            lines += ag
+        lines.append("")
+        lines.append("全量原始列表：/ambush；单个币判定：/check 币名；明细看板 https://yaobi.zeabur.app/")
         return "\n".join(lines)
 
     def ans_ambush(self):
