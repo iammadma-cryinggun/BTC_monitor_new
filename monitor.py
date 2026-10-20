@@ -7,7 +7,7 @@
   - 跨扫描维护 state.json，只在「阶段/事件发生转移」时推送信号:
         🚀 ENTER   新启动 (S2 第一根巨量突破)  -> 进观察列表做 S3->S4
         💧 DIP     S3 洗盘 -> 可低吸
-        🔥 AMBUSH  横盘蓄力 + 量能抬头连续两轮确认 -> 加入埋伏观察，等启动
+        🔥 AMBUSH  横盘蓄力 + 量能抬头连续两轮确认 -> 触发埋伏信号（记录在途，等启动）
         🔵 AMBUSH_LITE 次级蓄力（大盘币新周期：横盘更久+贴MA99，20日振幅未达妖币门槛）
                  -> 小仓位埋伏观察，等启动；追踪器按 tier=lite 分开统计胜率
         （AMBUSH 类信号有双重防抖：①vol_tick 需连续两轮扫描确认（4h K 被 2h 扫描
@@ -23,7 +23,7 @@
         🩸 CRASH   崩盘 -> 别接刀
         ↩️ BOUNCE  崩后巨量反弹 -> 阶段6不是底，别追
   - 每天本地 digest_hour 点推送「当日结论摘要」：价值榜（按历史战绩/燃料/
-    点位排序的埋伏候选 TOP5）+ 在途埋伏老化结论 + 战报（推荐明细看板/命令里有）
+    点位排序的候选 TOP5）+ 在途埋伏老化结论 + 战报（推荐明细看板/命令里有）
 
 防封策略:
   - 只访问公开行情 klines（无需 API key，权重极低）
@@ -992,7 +992,7 @@ class Monitor:
         lines = []
         src = getattr(self, "universe_source", "curated")
         lines.append(f"监控池 {src} · 池大小 {len(self.universe)} · 本轮有效 {len(ranked)} 币 | "
-                     f"埋伏候选 {len(coiling)} | 次级 {sum(1 for r in ranked if r['label']=='COILING_LITE')} | 刚启动 {len(fresh)}")
+                     f"观察候选 {len(coiling)} | 次级 {sum(1 for r in ranked if r['label']=='COILING_LITE')} | 刚启动 {len(fresh)}")
         rg = None
         try:
             import timing as _timing

@@ -138,7 +138,7 @@ try:
               "1/2轮胜" in html_txt)
 
     # digest and dashboard must agree — the original symptom was divergence
-    digests = [m for t, m, l in mon.notifier.sent if "埋伏价值榜" in m]
+    digests = [m for t, m, l in mon.notifier.sent if "候选价值榜" in m]
     check("first scan: initial digest sent", len(digests) == 1)
     if digests:
         check("CONSISTENCY: digest board and dashboard ev say the same thing",

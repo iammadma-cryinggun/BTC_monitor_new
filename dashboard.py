@@ -282,7 +282,7 @@ def build_dashboard_html(ranked, signals, meta=None):
     others_disp = others[:150] if capped else others
     ordered = watch + others_disp
 
-    watch_rows = "".join(_row(r) for r in watch) or '<tr><td colspan="13" class="rs">（暂无埋伏候选）</td></tr>'
+    watch_rows = "".join(_row(r) for r in watch) or '<tr><td colspan="13" class="rs">（暂无观察候选）</td></tr>'
     full_rows = "".join(_row(r) for r in ordered) or '<tr><td colspan="13" class="rs">（无数据）</td></tr>'
 
     sig_rows = ""
@@ -357,18 +357,18 @@ th{{color:var(--mut);font-weight:600;position:sticky;top:0;background:var(--card
 </div>
 
 <div class="card">
-  <div class="h2">🔥 埋伏观察列表（按证据分排序 = 潜力+历史战绩+逼空燃料+点位；横盘蓄力 / 刚启动，盯紧第一根巨量突破；⚡=15m点位就绪：价>VWAP且EMA9>20，✋=未就绪）</div>
+  <div class="h2">🔥 观察候选列表（按证据分排序 = 潜力+历史战绩+逼空燃料+点位；横盘蓄力 / 刚启动，盯紧第一根巨量突破；标签 🔥埋伏★ = 量能已抬头、接近 AMBUSH 触发；⚡=15m点位就绪：价>VWAP且EMA9>20，✋=未就绪）</div>
   <table><tr><th>币种</th><th>标签</th><th>阶段</th><th>分</th><th>潜力</th><th>证据分</th><th>现价</th><th>vsMA99</th><th>1hMA99</th><th>OI·费率</th><th>~1日</th><th>4h走势</th><th>依据</th></tr>
   {watch_rows}
   </table>
 </div>
 
 <div class="card">
-  <div class="h2">📊 全量监控（按埋伏分排序，显示前 {len(ordered)} / 共 {n_coins}）</div>
+  <div class="h2">📊 全量监控（按信号分排序，显示前 {len(ordered)} / 共 {n_coins}）</div>
   <table><tr><th>币种</th><th>标签</th><th>阶段</th><th>分</th><th>潜力</th><th>证据分</th><th>现价</th><th>vsMA99</th><th>1hMA99</th><th>OI·费率</th><th>~1日</th><th>4h走势</th><th>依据</th></tr>
   {full_rows}
   </table>
-  {('<div class="note">已按埋伏分截断显示前 150 行；全部 {0} 个币均已扫描，完整数据见 <code>data/monitor_state.json</code>。</div>'.format(len(others))) if capped else ''}
+  {('<div class="note">已按信号分截断显示前 150 行；全部 {0} 个币均已扫描，完整数据见 <code>data/monitor_state.json</code>。</div>'.format(len(others))) if capped else ''}
 </div>
 
 <div class="card">
@@ -499,7 +499,7 @@ th{color:var(--mut);font-weight:600;position:sticky;top:0;background:var(--card)
   <div id="health"></div>
 </div>
 <div class="card">
-  <div class="h2">🔥 埋伏观察列表（按证据分排序 = 潜力+历史战绩+逼空燃料+点位；横盘蓄力 / 刚启动，盯紧第一根巨量突破；⚡=15m点位就绪：价>VWAP且EMA9>20，✋=未就绪）</div>
+  <div class="h2">🔥 观察候选列表（按证据分排序 = 潜力+历史战绩+逼空燃料+点位；横盘蓄力 / 刚启动，盯紧第一根巨量突破；标签 🔥埋伏★ = 量能已抬头、接近 AMBUSH 触发；⚡=15m点位就绪：价>VWAP且EMA9>20，✋=未就绪）</div>
   <table><tr><th>币种</th><th>标签</th><th>阶段</th><th>分</th><th>潜力</th><th>证据分</th><th>现价</th><th>vsMA99</th><th>1hMA99</th><th>OI·费率</th><th>~1日</th><th>4h走势</th><th>依据</th></tr>
   <tbody id="watch"></tbody></table>
 </div>
@@ -640,10 +640,10 @@ function render(d){
   var others=ranked.filter(function(r){return r.label!=="COILING"&&r.label!=="COILING_LITE"&&r.label!=="FRESH_LAUNCH";});
   others.sort(function(a,b){return (b.score||0)-(a.score||0);});
   var capped=others.length>150, disp=watch.concat(others.slice(0,150));
-  document.getElementById("watch").innerHTML = watch.map(row).join("") || '<tr><td colspan="13" class="rs">（暂无埋伏候选）</td></tr>';
+  document.getElementById("watch").innerHTML = watch.map(row).join("") || '<tr><td colspan="13" class="rs">（暂无观察候选）</td></tr>';
   document.getElementById("full").innerHTML = disp.map(row).join("") || '<tr><td colspan="13" class="rs">（无数据）</td></tr>';
-  document.getElementById("fullh2").textContent = "📊 全量监控（按埋伏分排序，显示前 "+disp.length+" / 共 "+rok+"）";
-  document.getElementById("fullnote").innerHTML = capped ? ("已按埋伏分截断显示前 150 行；全部 "+others.length+" 个币均已扫描，完整数据见 data/monitor_state.json。") : "";
+  document.getElementById("fullh2").textContent = "📊 全量监控（按信号分排序，显示前 "+disp.length+" / 共 "+rok+"）";
+  document.getElementById("fullnote").innerHTML = capped ? ("已按信号分截断显示前 150 行；全部 "+others.length+" 个币均已扫描，完整数据见 data/monitor_state.json。") : "";
   // signals
   var sg="";
   sigs.slice(-30).reverse().forEach(function(s){

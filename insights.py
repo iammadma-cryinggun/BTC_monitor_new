@@ -212,7 +212,7 @@ def board_lines(rows, n_total, lw=None):
     """Format the value board as message lines (digest / /value share these)."""
     if not rows:
         return []
-    lines = [f"🎯 埋伏价值榜 · 当前横盘候选 {n_total} 个，只列前 {len(rows)} 个证据最硬的："]
+    lines = [f"🎯 候选价值榜 · 当前横盘观察候选 {n_total} 个（均为观察态），只列前 {len(rows)} 个证据最硬的："]
     for i, r in enumerate(rows, 1):
         tag = "[次级] " if r["tier"] == "lite" else ""
         pot = r.get("potential")

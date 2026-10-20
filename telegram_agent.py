@@ -15,7 +15,7 @@ Commands (slash or natural language):
   /help 帮助                  — this list
   /status 状态                — scan summary / pool / label counts
   /value 价值榜/值得埋谁       — EVIDENCE-ranked ambush board + aging verdicts
-  /ambush 埋伏列表            — current ambush watch list (raw, full)
+  /ambush 候选列表            — candidate watch list (raw, full)
   /track [SYM] 追踪/复盘/胜率 — ambush tracker stats, or one symbol's calls
   /check SYM                  — live re-score + "还能埋伏吗" verdict
   "<SYM> 还能埋伏吗 / 怎么样" — same as /check
@@ -36,7 +36,7 @@ HELP = (
     "直接发消息问我（只读，不代下单）：\n\n"
     "/value 或 价值榜/值得埋谁 — 结论版：按历史战绩排序的价值榜+老化提醒\n"
     "/status 或 状态 — 扫描概况\n"
-    "/ambush 或 埋伏列表 — 当前埋伏候选（全量原始列表）\n"
+    "/ambush 或 候选列表 — 当前观察候选（全量原始列表，均为观察态；触发推送看 🔥AMBUSH 信号）\n"
     "/track 或 追踪/复盘 — 埋伏信号自检统计\n"
     "/track BANKUSDT — 该币历次埋伏追踪明细\n"
     "/check BANKUSDT — 实时重扫该币 + 还能埋伏吗判定\n"
@@ -285,7 +285,7 @@ class TelegramAgent:
             return "当前没有 COILING（横盘蓄力）币。"
         lines = []
         if rk:
-            lines.append(f"🔥 埋伏观察列表（{len(rk)} 个，按证据分排序，前 12）：")
+            lines.append(f"🔥 观察候选列表（{len(rk)} 个，按证据分排序，前 12；均为观察态）：")
             for r in rk[:12]:
                 star = "★" if r.get("vol_tick") else " "
                 tm = r.get("timing") or {}

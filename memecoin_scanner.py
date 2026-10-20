@@ -705,7 +705,7 @@ ul{{font-size:12px;color:#94a3b8}}
 <div class="sub">生成时间 {gen} · 数据源 {src_label} · 4h 六阶段 + 1h MA99 · 时区均为 UTC（Binance K线原生时区）</div>
 <div class="card">
 <div class="kpi">扫描 <b>{len(ranked)}</b> 个币</div>
-<div class="kpi">埋伏候选 <b>{n_act}</b></div>
+<div class="kpi">观察候选 <b>{n_act}</b></div>
 <div class="kpi">🔥量能抬头 <b style="color:#f59e0b">{n_amb}</b></div>
 <div class="kpi">⚡刚启动 <b style="color:#22c55e">{n_fresh}</b></div>
 </div>
