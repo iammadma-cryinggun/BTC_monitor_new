@@ -713,6 +713,10 @@ class DashboardServer:
     `/state.json` / `/signals.json` -> raw data files
     `POST /restore_track`  -> restore the ambush tracker from a local backup
                               (token-gated; see do_POST)
+    `GET /export_track`    -> dump the FULL ambush tracker (token-gated;
+                              header X-Restore-Token or ?token=) so a fresh
+                              snapshot can be pulled for offline backup —
+                              the symmetric counterpart of /restore_track
     """
     def __init__(self, host="0.0.0.0", port=8080, data_dir=DATA, monitor=None):
         self.host = host
@@ -817,8 +821,43 @@ class DashboardServer:
                 self.wfile.write(body)
 
             def do_GET(self):
-                # strip query string (cache-busters) before matching
-                self.path = self.path.split("?", 1)[0]
+                # capture the query string (token= for /export_track) BEFORE
+                # stripping it for the cache-buster routes
+                raw_path, _, qs = self.path.partition("?")
+                self.path = raw_path
+                if self.path == "/export_track":
+                    """Full tracker export, token-gated. 2026-10-20: the
+                    volume keeps getting wiped on pod reschedule, and the
+                    only recovery source was a stale local download. This
+                    endpoint lets a FRESH snapshot be pulled anytime:
+                      GET /export_track   header X-Restore-Token: <token>
+                                          or /export_track?token=<token>
+                    Returns the raw ambush_track.json bytes (attachment)."""
+                    token = os.environ.get("RESTORE_TOKEN", "").strip()
+                    if not token:
+                        self._reply_json(403, {"ok": False,
+                                               "error": "export disabled: RESTORE_TOKEN env var not set"})
+                        return
+                    supplied = self.headers.get("X-Restore-Token", "").strip()
+                    if "token=" in qs:
+                        supplied = qs.split("token=", 1)[1].split("&", 1)[0].strip()
+                    if supplied != token:
+                        self._reply_json(403, {"ok": False, "error": "bad token"})
+                        return
+                    cur = os.path.join(data_dir, "ambush_track.json")
+                    if not os.path.exists(cur):
+                        self._reply_json(404, {"ok": False, "error": "no tracker on disk yet"})
+                        return
+                    with open(cur, "rb") as f:
+                        body = f.read()
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json; charset=utf-8")
+                    self.send_header("Content-Disposition",
+                                     'attachment; filename="ambush_track.json"')
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+                    return
                 if self.path in ("/", "/index.html", "/dashboard", ""):
                     self.send_response(200)
                     self.send_header("Content-Type", "text/html; charset=utf-8")

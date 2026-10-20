@@ -89,9 +89,40 @@ check("clobber guard -> 409 without force", st == 409 and "force=1" in out.get("
 st, out = post("/restore_track?force=1", BODY)
 check("force=1 -> 200 overwrite", st == 200 and out.get("ok"))
 
+# ---------- part 1b: export endpoint (symmetric online backup pull) ----------
+def get(path, token="sekrit-token-123"):
+    conn = http.client.HTTPConnection("127.0.0.1", PORT, timeout=10)
+    hdr = {}
+    if token is not None:
+        hdr["X-Restore-Token"] = token
+    conn.request("GET", path, headers=hdr)
+    r = conn.getresponse()
+    raw = r.read()
+    conn.close()
+    return r.status, raw
+
+st, raw = get("/export_track", token=None)
+check("export: no token -> 403", st == 403)
+st, raw = get("/export_track", token="wrong")
+check("export: wrong token -> 403", st == 403)
+st, raw = get("/export_track")
+try:
+    ex_body = json.loads(raw.decode("utf-8"))
+except Exception:
+    ex_body = {}
+check("export: valid token -> 200 full tracker (2 entries)",
+      st == 200 and len(ex_body.get("entries") or []) == 2)
+st, raw = get("/export_track?token=sekrit-token-123", token=None)
+check("export: ?token= query also accepted", st == 200)
+check("export: exported file equals what restore wrote",
+      json.loads(raw.decode("utf-8")).get("entries") ==
+      json.load(open(os.path.join(tmp, "ambush_track.json"), encoding="utf-8")).get("entries"))
+
 del os.environ["RESTORE_TOKEN"]
 st, out = post("/restore_track", BODY, token=None)
 check("env unset -> endpoint disabled 403", st == 403 and "RESTORE_TOKEN" in out.get("error", ""))
+st, raw = get("/export_track", token=None)
+check("export: env unset -> disabled 403", st == 403 and b"RESTORE_TOKEN" in raw)
 os.environ["RESTORE_TOKEN"] = "sekrit-token-123"
 srv.shutdown()
 
