@@ -103,16 +103,38 @@ def launch_window_note(lw):
 # per-coin re-entry record: the "same-coin compounding" evidence
 # ----------------------------------------------------------------------------
 def coin_history(entries, sym):
-    """Prior FINALIZED episodes of a coin: how many rounds, how many reached
-    +30% peak, best peak. The re-entry edge evidence (ONE x3 lesson)."""
+    """Prior FINALIZED episodes of a coin, PLUS the recency structure that
+    actually predicts (2026-10-20 review of 1140 round-transitions):
+
+      P(next round +30% | last round won)   ~= 70%   (streak length irrelevant)
+      P(next round +30% | no history)       ~= 39%
+      P(next round +30% | last round lost)  ~= 12%   (aggregate wins in the
+        coin's deeper history add NOTHING once the last round lost: 9.6%)
+
+    So the edge is RECENCY, not the aggregate: a win-win-lose coin behaves
+    like a loser (9.6%), not like a double winner. Returns rounds/wins/best
+    for display plus last_win / lose_streak for scoring.
+    """
     fins = [e for e in _entries_or(entries)
             if e.get("sym") == sym and e.get("status") in
             ("win_strong", "win", "weak", "miss", "pre_fail", "timeout")]
     wins = [e for e in fins if (e.get("peak_gain") or 0) >= WIN]
     peaks = [e.get("peak_gain") for e in fins
              if isinstance(e.get("peak_gain"), (int, float))]
+    last_win = None
+    lose_streak = 0
+    if fins:
+        # entries are appended chronologically; scan from the end, skipping
+        # nothing (all fins are finalized rounds)
+        last_win = (fins[-1].get("peak_gain") or 0) >= WIN
+        if not last_win:
+            for e in reversed(fins):
+                if (e.get("peak_gain") or 0) >= WIN:
+                    break
+                lose_streak += 1
     return {"rounds": len(fins), "wins": len(wins),
-            "best": round(max(peaks), 3) if peaks else None}
+            "best": round(max(peaks), 3) if peaks else None,
+            "last_win": last_win, "lose_streak": lose_streak}
 
 
 # ----------------------------------------------------------------------------
@@ -122,7 +144,11 @@ def value_board(ranked, entries=None, top=5):
     """Rank currently-coiling candidates by evidence, not by raw potential.
 
     points = potential (0-100, elasticity x duration x fuel)
-           + 30 per prior winning episode (cap +60)   <- re-entry edge
+           + 30 last-round WIN re-entry (flat — win streaks don't compound:
+              1/2/3-in-a-row all win the next round ~70% of the time)
+           - 15 last-round loss; -25 when the losing streak >= 2
+              (next-round win rate decays 12% -> 10% -> 4.9% with streak
+              length, and deeper WINS add nothing once the last round lost)
            + 10 squeeze fuel (funding<0 AND OI 24h>+10%)
            +  8 15m entry timing ready
            +  5 volume ticking (埋伏★ condition)
@@ -140,17 +166,23 @@ def value_board(ranked, entries=None, top=5):
             hist[s] = coin_history(entries, s)
     rows = []
     for r in cands:
-        h = hist.get(r["sym"]) or {"rounds": 0, "wins": 0, "best": None}
+        h = hist.get(r["sym"]) or {"rounds": 0, "wins": 0, "best": None,
+                                   "last_win": None, "lose_streak": 0}
         pot = r.get("potential")
         pts = float(pot if isinstance(pot, (int, float)) else (r.get("score") or 0))
         reasons = []
-        if h["wins"]:
-            pts += min(60.0, 30.0 * h["wins"])
+        if h.get("last_win"):
+            pts += 30.0
             reasons.append(f"第{h['rounds']+1}轮重入：前 {h['wins']}/{h['rounds']} 轮"
-                           f"峰值达 +30%（最佳 {_fmt_pct(h['best'])}）——同币复利是历史最大赢面")
-        elif h["rounds"]:
-            reasons.append(f"第{h['rounds']+1}轮重入：前 {h['rounds']} 轮无 +30% 战绩"
-                           f"（最佳 {_fmt_pct(h['best'])}）——重入信任打折")
+                           f"峰值达 +30%（最佳 {_fmt_pct(h['best'])}），上一轮刚赢——"
+                           f"历史 70% 的此类重入下一轮再达标，同币复利是历史最大赢面")
+        elif h.get("rounds"):
+            ls = h.get("lose_streak") or 1
+            pts -= (25.0 if ls >= 2 else 15.0)
+            base_rate = "12%" if ls < 2 else "5%"
+            reasons.append(f"第{h['rounds']+1}轮重入：连败 {ls} 轮"
+                           f"（最佳 {_fmt_pct(h['best'])}）——历史复盘：此类重入"
+                           f"下一轮仅 {base_rate} 达标，已降权，建议回避")
         fd, oc = r.get("funding"), r.get("oi_chg_24h")
         if (isinstance(fd, (int, float)) and fd < 0
                 and isinstance(oc, (int, float)) and oc > 0.10):
@@ -170,10 +202,10 @@ def value_board(ranked, entries=None, top=5):
         if not reasons:
             reasons.append(f"新面孔：潜力 {pts:.0f}（弹性×蓄力×燃料），无历史战绩可查")
         note_parts = []
-        if h["wins"]:
-            note_parts.append(f"{h['wins']}/{h['rounds']}轮胜·最佳{_fmt_pct(h['best'])}")
-        elif h["rounds"]:
-            note_parts.append(f"{h['rounds']}轮皆败·最佳{_fmt_pct(h['best'])}")
+        if h.get("last_win"):
+            note_parts.append(f"{h['wins']}/{h['rounds']}轮胜·上轮胜·最佳{_fmt_pct(h['best'])}")
+        elif h.get("rounds"):
+            note_parts.append(f"⚠️连败{h.get('lose_streak') or 1}轮·最佳{_fmt_pct(h['best'])}")
         else:
             note_parts.append("新面孔·无战绩")
         if any("逼空燃料" in s for s in reasons):

@@ -138,9 +138,9 @@ ranked = [
 rows, n_c = insights.value_board(ranked, hist_entries, top=5)
 check("board: 7 candidates detected", n_c == 7)
 check("board: capped at top=5", len(rows) == 5)
-# ONE: 50 + 60(re-entry cap) + 8(timing) + 5(vol_tick) = 123 -> first
+# ONE: 50 + 30(last-round win, flat) + 8(timing) + 5(vol_tick) = 93 -> first
 check("board: re-entry record outranks raw potential",
-      rows[0]["sym"] == "ONEUSDT" and rows[0]["pts"] == 123)
+      rows[0]["sym"] == "ONEUSDT" and rows[0]["pts"] == 93)
 # SQUEE: 65 + 10(fuel) = 75 > NEW 70
 check("board: squeeze fuel adds points",
       rows[1]["sym"] == "SQUEEUSDT" and rows[1]["pts"] == 75)
@@ -156,6 +156,46 @@ row_new_reasons = " ".join(row_new["reasons"])
 check("board: no-history candidate says 新面孔", "新面孔" in row_new_reasons)
 lite_row = next(r for r in rows if r["sym"] == "LITEUSDT")
 check("board: lite tier tagged", lite_row["tier"] == "lite")
+
+# ---------- 4a-bis. recency-based re-entry scoring (2026-10-20 review) ----------
+rows_full, _ = insights.value_board(ranked, hist_entries, top=10)
+row_ago = next(r for r in rows_full if r["sym"] == "AGOUSDT")
+check("board: last-round loss penalized -15",
+      row_ago["pts"] == 45 and any("连败 1 轮" in s for s in row_ago["reasons"]))
+check("board: lose note carries warning marker", "⚠️连败1轮" in row_ago["note"])
+lose3 = [_ent("L3USDT", "2026-06-%02dT00:00:00+00:00" % (1 + i * 5),
+              status="pre_fail", peak=-0.21) for i in range(3)]
+rows_l3, _ = insights.value_board([cand("L3USDT", potential=60)],
+                                  hist_entries + lose3, top=1)
+check("board: losing streak >=2 penalized -25 (3 straight losses)",
+      rows_l3[0]["pts"] == 35)
+mixed = [_ent("MXUSDT", "2026-05-01T00:00:00+00:00", status="win", peak=0.5),
+         _ent("MXUSDT", "2026-06-01T00:00:00+00:00", status="pre_fail", peak=-0.2)]
+rows_mx, _ = insights.value_board([cand("MXUSDT", potential=60)],
+                                  hist_entries + mixed, top=1)
+check("board: win-then-lose counts as a loser (recency beats aggregate)",
+      rows_mx[0]["pts"] == 45 and "连败 1 轮" in " ".join(rows_mx[0]["reasons"]))
+lastwin = [_ent("LWUSDT", "2026-05-01T00:00:00+00:00", status="pre_fail", peak=-0.2),
+           _ent("LWUSDT", "2026-06-01T00:00:00+00:00", status="win", peak=0.5)]
+rows_lw, _ = insights.value_board([cand("LWUSDT", potential=60)],
+                                  hist_entries + lastwin, top=1)
+check("board: lose-then-win gets the flat +30 (streak length irrelevant)",
+      rows_lw[0]["pts"] == 90)
+
+# ---------- 4c. record_entry captures the full feature set ----------
+ambush_tracker.save({"entries": []})
+rec_full = dict(sym="FEATUSDT", price=0.5, score=88, flat_run=40, range_w=0.08,
+                pv=-0.05, ma99_1h=0.49, potential=72.0, funding=-0.001,
+                oi_chg_24h=0.15, vol_tick=True,
+                timing={"ready": True, "vwap_dist": 0.002})
+saved_ent = ambush_tracker.record_entry(rec_full)
+check("record_entry: full feature set captured",
+      saved_ent is not None and saved_ent.get("potential") == 72.0
+      and saved_ent.get("funding") == -0.001 and saved_ent.get("oi_chg_24h") == 0.15
+      and saved_ent.get("vol_tick") is True and saved_ent.get("timing_ready") is True)
+check("record_entry: legacy fields intact",
+      saved_ent.get("flat_run") == 40 and saved_ent.get("range_w") == 0.08
+      and saved_ent.get("pv") == -0.05)
 
 bl = insights.board_lines(rows, n_c, lw)
 text_bl = "\n".join(bl)
@@ -174,7 +214,8 @@ ranked2 = [dict(c) for c in ranked]
 insights.attach_evidence(ranked2, hist_entries)
 one_rec = next(r for r in ranked2 if r["sym"] == "ONEUSDT")
 check("attach: ev_pts/ev_note set on coiling rec",
-      one_rec.get("ev_pts") == 123 and "2/2轮胜" in one_rec.get("ev_note", ""))
+      one_rec.get("ev_pts") == 93 and "2/2轮胜" in one_rec.get("ev_note", "")
+      and "上轮胜" in one_rec.get("ev_note", ""))
 new_rec = next(r for r in ranked2 if r["sym"] == "NEWUSDT")
 check("attach: fresh coin gets 新面孔 note", "新面孔" in new_rec.get("ev_note", ""))
 ranked2.append(dict(sym="PUMPUSDT", label="PUMPED", score=40, price=1.0,

@@ -507,6 +507,40 @@ class Monitor:
         except Exception:
             pass
 
+    def _log_regime(self, ranked, btc_regime=None):
+        """One breadth row per scan into data/regime_log.json (capped 2000).
+
+        Labels are the market's own breadth: coiling share (energy stored),
+        fresh+launched share (money already moving), crashing share (risk-off).
+        Paired with per-entry outcomes in the tracker this becomes the
+        regression dataset for a future regime gate.
+        """
+        from collections import Counter as _C
+        lab = _C(str(r.get("label") or "?") for r in (ranked or []))
+        n = len(ranked or [])
+        if not n:
+            return
+        share = lambda k: round(lab.get(k, 0) / n, 3)
+        row = dict(ts=now_iso(), n=n, btc=btc_regime,
+                   coiling=share("COILING"), lite=share("COILING_LITE"),
+                   fresh=share("FRESH_LAUNCH"), launched=share("LAUNCHED"),
+                   pumped=share("PUMPED"), crashing=share("CRASHING"))
+        p = os.path.join(HERE, "data", "regime_log.json")
+        rows = []
+        try:
+            if os.path.exists(p):
+                rows = json.load(open(p, encoding="utf-8")) or []
+                if not isinstance(rows, list):
+                    rows = []
+        except Exception:
+            rows = []
+        rows.append(row)
+        rows = rows[-2000:]
+        tmp = p + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(rows, f, ensure_ascii=False)
+        os.replace(tmp, p)
+
     def _effective_interval_s(self):
         """Scan interval in seconds — shortened after a TOTAL data outage.
 
@@ -837,6 +871,17 @@ class Monitor:
             insights.attach_evidence(ranked, ambush_tracker.load()["entries"])
         except Exception as e:
             print(f"[insights] evidence attach skipped: {e}")
+        # regime/breadth observation log — one row per scan. 2026-10-20 review
+        # found firing quality swings violently with market regime (Oct
+        # entries: 65.5% pre_fail vs Aug 17.6%) but the system neither gates
+        # nor even MEASURES it. This log is the calibration dataset for a
+        # future regime gate: breadth (share of coins by label) + BTC 15m
+        # regime, so in a few weeks we can regress outcome-vs-breadth and
+        # decide the gate with evidence instead of intuition.
+        try:
+            self._log_regime(ranked, self.btc_regime)
+        except Exception as e:
+            print(f"[regime-log] skipped: {e}")
         # persist the fired-event ledger with the rest of the state
         state_out["_fired_events"] = fired
         self.save_state(state_out)

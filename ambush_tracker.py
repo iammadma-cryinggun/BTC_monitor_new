@@ -93,6 +93,12 @@ def record_entry(rec, now=None, source="live", score=None, tier="main"):
         score=(score if score is not None else rec.get("score")),
         flat_run=rec.get("flat_run"), range_w=rec.get("range_w"),
         pv=rec.get("pv"), ma99_1h=rec.get("ma99_1h"),
+        # full entry-time feature set (2026-10-20 review): these are the
+        # levers the value board ranks on — record them at entry so future
+        # reviews can calibrate each one against actual outcomes
+        potential=rec.get("potential"), funding=rec.get("funding"),
+        oi_chg_24h=rec.get("oi_chg_24h"), vol_tick=bool(rec.get("vol_tick")),
+        timing_ready=(rec.get("timing") or {}).get("ready"),
         status="waiting", launched_ts=None, launched_price=None,
         launch_delay_d=None, max_price=float(rec["price"]),
         min_price=float(rec["price"]), peak_gain=None,
@@ -372,6 +378,21 @@ def backfill(market="futures", quiet=False):
                 s += 8
             return min(98, s)
 
+        def feats_at(i):
+            """Entry-time features for the tracker record (2026-10-20 review:
+            backfill entries carried NO features, 0/2725 coverage — blocking
+            any outcome-vs-feature calibration. All causal columns at bar i.)"""
+            fr = 0
+            k = i
+            while k >= 0 and consol[k]:
+                fr += 1; k -= 1
+            w = close[max(0, i - 14):i + 1]
+            med = float(np.mean(w)) if len(w) else 0.0
+            rw = ((high[max(0, i - 14):i + 1].max() - low[max(0, i - 14):i + 1].min()) / med
+                  if med > 0 else None)
+            pv = (close[i] / ma99[i] - 1.0) if ma99[i] == ma99[i] and ma99[i] > 0 else None
+            return fr, (round(rw, 4) if rw is not None else None), (round(pv, 4) if pv is not None else None)
+
         i = 120
         while i < n - 1:
             if coiling(i) and tick(i) and not (coiling(i - 1) and tick(i - 1)):
@@ -384,10 +405,11 @@ def backfill(market="futures", quiet=False):
                     while j < n and str(stage[j]) == "S1":
                         j += 1
                     ep = float(close[i])
+                    _fr, _rw, _pv = feats_at(i)
                     e = dict(
                         sym=sym, ts=t0.isoformat(), source="backfill",
                         entry_price=ep, score=round(score_at(i), 1),
-                        flat_run=None, range_w=None, pv=None, ma99_1h=None,
+                        flat_run=_fr, range_w=_rw, pv=_pv, ma99_1h=None,
                         status="waiting", launched_ts=None, launched_price=None,
                         launch_delay_d=None, max_price=ep, min_price=ep,
                         peak_gain=None, final_ts=None,

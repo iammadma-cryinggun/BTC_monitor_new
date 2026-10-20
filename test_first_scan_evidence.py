@@ -76,8 +76,11 @@ def fake_backfill(market="futures", quiet=False):
     entries = [_hist_ent(f"H{i:02d}USDT", "2026-08-01T00:00:00+00:00",
                          "win", 1.0, 0.5) for i in range(25)]
     entries += [
-        _hist_ent("TESTUSDT", "2026-06-01T00:00:00+00:00", "win", 2.0, 0.60),
-        _hist_ent("TESTUSDT", "2026-07-15T00:00:00+00:00", "miss", 20.0, -0.10),
+        # NOTE: last round must be a WIN — the recency-based re-entry score
+        # (2026-10-20 review) gives the +30 bonus only when the MOST RECENT
+        # round won; a win-then-lose coin is penalized like a loser.
+        _hist_ent("TESTUSDT", "2026-06-01T00:00:00+00:00", "miss", 20.0, -0.10),
+        _hist_ent("TESTUSDT", "2026-07-15T00:00:00+00:00", "win", 2.0, 0.60),
     ]
     ambush_tracker.save({"entries": entries})
 
@@ -163,7 +166,7 @@ finally:
             shutil.move(bak, cur)
     for name in ("monitor_state.json", "scan_summary.json", "dashboard_data.json",
                  "dashboard_data.html", "dashboard.html", "signals_log.json",
-                 "ambush_track.json"):
+                 "ambush_track.json", "regime_log.json"):
         p = os.path.join(DATA, name)
         if os.path.exists(p):
             try:
