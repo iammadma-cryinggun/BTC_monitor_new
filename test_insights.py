@@ -164,6 +164,25 @@ check("board_lines: header + numbered items + method line",
       and "排序口径" in text_bl and "52%" in text_bl)
 check("board_lines: lite tag rendered", "[次级] LITEUSDT" in text_bl)
 
+# ---------- 4b. compact note + attach_evidence (dashboard/ambush ordering) ----------
+rows_full, _ = insights.value_board(ranked, hist_entries, top=10)
+row_one_full = next(r for r in rows_full if r["sym"] == "ONEUSDT")
+check("board: compact note present",
+      "2/2轮胜" in row_one_full["note"] and "+599%" in row_one_full["note"])
+
+ranked2 = [dict(c) for c in ranked]
+insights.attach_evidence(ranked2, hist_entries)
+one_rec = next(r for r in ranked2 if r["sym"] == "ONEUSDT")
+check("attach: ev_pts/ev_note set on coiling rec",
+      one_rec.get("ev_pts") == 123 and "2/2轮胜" in one_rec.get("ev_note", ""))
+new_rec = next(r for r in ranked2 if r["sym"] == "NEWUSDT")
+check("attach: fresh coin gets 新面孔 note", "新面孔" in new_rec.get("ev_note", ""))
+ranked2.append(dict(sym="PUMPUSDT", label="PUMPED", score=40, price=1.0,
+                    potential=None, vol_tick=False, timing=None))
+insights.attach_evidence(ranked2, hist_entries)
+pump_rec = next(r for r in ranked2 if r["sym"] == "PUMPUSDT")
+check("attach: non-coiling recs get NO ev fields", pump_rec.get("ev_pts") is None)
+
 # ---------- 5. aging_lines ----------
 ag = insights.aging_lines(hist_entries, lw=lw, now=NOW)
 ag_text = "\n".join(ag)
@@ -238,6 +257,41 @@ check("tg: aging verdicts included in /value", "老化" in (r1 or ""))
 check("tg: board same source as digest (TESTUSDT is a fresh face there)",
       "TESTUSDT" in (r1 or ""))
 
+# ---------- 7b. evidence ordering everywhere (web + /ambush) ----------
+rec_t = next((r for r in (mon.last_ranked or []) if r["sym"] == "TESTUSDT"), None)
+check("monitor: scan enriched recs with ev_pts/ev_note",
+      rec_t is not None and isinstance(rec_t.get("ev_pts"), (int, float))
+      and "新面孔" in rec_t.get("ev_note", ""))
+try:
+    dd = json.load(open(os.path.join(DATA, "dashboard_data.json"), encoding="utf-8"))
+    rec_dd = next((r for r in dd.get("ranked", []) if r["sym"] == "TESTUSDT"), None)
+    check("dashboard: live data json carries ev_pts",
+          rec_dd is not None and isinstance(rec_dd.get("ev_pts"), (int, float)))
+    html_txt = open(os.path.join(DATA, "dashboard.html"), encoding="utf-8").read()
+    check("dashboard: static html has 证据分 column + ev note",
+          "证据分" in html_txt and "新面孔" in html_txt)
+except FileNotFoundError:
+    check("dashboard: files written", False)
+
+ranked3 = [
+    cand("NEWUSDT", potential=70),
+    cand("ONEUSDT", potential=50, vol_tick=True,
+         timing={"ready": True, "vwap_dist": 0.001}),
+]
+insights.attach_evidence(ranked3, hist_entries)
+
+class FakeMon2:
+    last_ranked = ranked3
+
+ag_bot2 = TelegramAgent(FakeNotifier(), FakeMon2())
+r5 = ag_bot2.ans_ambush()
+coin_lines = [l for l in (r5 or "").split("\n")
+              if "NEWUSDT" in l or "ONEUSDT" in l]
+check("tg: /ambush evidence-ordered (re-entry coin above raw potential)",
+      bool(coin_lines) and "ONEUSDT" in coin_lines[0])
+check("tg: /ambush rows carry the evidence note",
+      "证据" in (r5 or "") and "2/2轮胜" in (r5 or ""))
+
 # ---------------------------------------------------------------------------
 # cleanup
 # ---------------------------------------------------------------------------
@@ -246,7 +300,8 @@ for bak, cur in _MOVED:
         shutil.move(bak, cur)
 shutil.rmtree(tmp, ignore_errors=True)
 for name in ("monitor_state.json", "scan_summary.json", "dashboard_data.json",
-             "dashboard_data.html", "signals_log.json", "ambush_track.json"):
+             "dashboard.html", "dashboard_data.html", "signals_log.json",
+             "ambush_track.json"):
     p = os.path.join(DATA, name)
     if os.path.exists(p):
         os.remove(p)

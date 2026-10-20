@@ -169,12 +169,43 @@ def value_board(ranked, entries=None, top=5):
             reasons.append("量能抬头中（埋伏★条件）")
         if not reasons:
             reasons.append(f"新面孔：潜力 {pts:.0f}（弹性×蓄力×燃料），无历史战绩可查")
+        note_parts = []
+        if h["wins"]:
+            note_parts.append(f"{h['wins']}/{h['rounds']}轮胜·最佳{_fmt_pct(h['best'])}")
+        elif h["rounds"]:
+            note_parts.append(f"{h['rounds']}轮皆败·最佳{_fmt_pct(h['best'])}")
+        else:
+            note_parts.append("新面孔·无战绩")
+        if any("逼空燃料" in s for s in reasons):
+            note_parts.append("逼空燃料")
         rows.append(dict(sym=r["sym"], pts=round(pts, 1), reasons=reasons,
+                         note="·".join(note_parts),
                          potential=pot, score=r.get("score"),
                          price=r.get("price"),
                          tier=("lite" if r.get("label") == "COILING_LITE" else "main")))
     rows.sort(key=lambda x: -x["pts"])
     return rows[:top], len(cands)
+
+
+def attach_evidence(ranked, entries=None):
+    """Attach ev_pts / ev_note to every COILING candidate IN PLACE.
+
+    The monitor calls this once per scan right after the timing badges, so
+    the SAME evidence ordering flows everywhere: dashboard_data.json (live
+    web tables), the static HTML snapshot, snapshot_from_monitor (the HTTP
+    endpoint), and the Telegram /ambush list. One source, one order — the
+    value board's. Recs keep their raw potential/score untouched.
+    """
+    rows, _ = value_board(ranked, entries, top=10 ** 6)
+    bysym = {r["sym"]: r for r in rows}
+    for rec in (ranked or []):
+        if rec.get("label") not in ("COILING", "COILING_LITE"):
+            continue
+        row = bysym.get(rec.get("sym"))
+        if row:
+            rec["ev_pts"] = row["pts"]
+            rec["ev_note"] = row["note"]
+    return ranked
 
 
 def board_lines(rows, n_total, lw=None):

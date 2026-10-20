@@ -808,6 +808,16 @@ class Monitor:
                     r["timing"] = t
         except Exception as e:
             print(f"[timing] watch badges skipped: {e}")
+        # evidence enrichment: value-board points + compact note on every
+        # coiling candidate, computed ONCE here so the dashboard tables, the
+        # live snapshot endpoint and the Telegram /ambush list ALL share the
+        # evidence-ranked ordering (2026-10-20 feedback: web/telegram still
+        # sorted by raw potential — the order that hides re-entry records)
+        try:
+            import ambush_tracker, insights
+            insights.attach_evidence(ranked, ambush_tracker.load()["entries"])
+        except Exception as e:
+            print(f"[insights] evidence attach skipped: {e}")
         # persist the fired-event ledger with the rest of the state
         state_out["_fired_events"] = fired
         self.save_state(state_out)

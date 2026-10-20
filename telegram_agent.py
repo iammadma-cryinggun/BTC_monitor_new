@@ -272,17 +272,20 @@ class TelegramAgent:
         return "\n".join(lines)
 
     def ans_ambush(self):
-        rk = [r for r in (self.monitor.last_ranked or [])
-              if r.get("label") == "COILING"]
-        rk.sort(key=lambda r: -r.get("potential", r.get("score", 0)))
-        lite = [r for r in (self.monitor.last_ranked or [])
-                if r.get("label") == "COILING_LITE"]
-        lite.sort(key=lambda r: -r.get("potential", r.get("score", 0)))
+        def _evkey(r):
+            if isinstance(r.get("ev_pts"), (int, float)):
+                return -r["ev_pts"]
+            p = r.get("potential")
+            return -(p if isinstance(p, (int, float)) else (r.get("score") or 0))
+        rk = sorted([r for r in (self.monitor.last_ranked or [])
+                     if r.get("label") == "COILING"], key=_evkey)
+        lite = sorted([r for r in (self.monitor.last_ranked or [])
+                       if r.get("label") == "COILING_LITE"], key=_evkey)
         if not rk and not lite:
             return "当前没有 COILING（横盘蓄力）币。"
         lines = []
         if rk:
-            lines.append(f"🔥 埋伏观察列表（{len(rk)} 个，按潜力排序，前 12）：")
+            lines.append(f"🔥 埋伏观察列表（{len(rk)} 个，按证据分排序，前 12）：")
             for r in rk[:12]:
                 star = "★" if r.get("vol_tick") else " "
                 tm = r.get("timing") or {}
@@ -296,17 +299,23 @@ class TelegramAgent:
                 dv_s = ("·" + "·".join(dv)) if dv else ""
                 m1 = r.get("ma99_1h")
                 pv1 = (r["price"] / m1 - 1.0) if (isinstance(m1, (int, float)) and m1 > 0) else None
-                lines.append(f" {star}{tmk} {r['sym']:<13} 潜力{r.get('potential',0):.0f} 分{r['score']:.0f} 价{r['price']:.6g} "
+                ev_s = ""
+                if isinstance(r.get("ev_pts"), (int, float)):
+                    ev_s = f" 证据{r['ev_pts']:.0f}({r.get('ev_note', '')})"
+                lines.append(f" {star}{tmk} {r['sym']:<13} 潜力{r.get('potential',0):.0f}{ev_s} 分{r['score']:.0f} 价{r['price']:.6g} "
                              f"vsMA99 {_f(r.get('pv'))} 1hM99 {_f(pv1)}{dv_s}")
             lines.append("★=量能抬头 · ⚡=15m 点位就绪（价>VWAP 且 EMA9>20）· ✋=未就绪。"
-                         "潜力=弹性×蓄力×燃料（若启动能走多远），分=信号质量（横盘多像剧本）。"
-                         "只盯 ⚡ 打仓位。完整列表看网页看板。")
+                         "证据分=潜力+历史战绩+逼空燃料+点位（/value 看结论版），潜力=弹性×蓄力×燃料，"
+                         "分=信号质量。只盯 ⚡ 打仓位。完整列表看网页看板。")
         if lite:
             lines.append("")
-            lines.append(f"🔵 次级蓄力（{len(lite)} 个，大盘币新周期横盘，按潜力前 6，仓位小于主档）：")
+            lines.append(f"🔵 次级蓄力（{len(lite)} 个，大盘币新周期横盘，按证据分前 6，仓位小于主档）：")
             for r in lite[:6]:
                 star = "★" if r.get("vol_tick") else " "
-                lines.append(f" {star} {r['sym']:<13} 潜力{r.get('potential',0):.0f} 分{r['score']:.0f} 价{r['price']:.6g} "
+                ev_s = ""
+                if isinstance(r.get("ev_pts"), (int, float)):
+                    ev_s = f" 证据{r['ev_pts']:.0f}({r.get('ev_note', '')})"
+                lines.append(f" {star} {r['sym']:<13} 潜力{r.get('potential',0):.0f}{ev_s} 分{r['score']:.0f} 价{r['price']:.6g} "
                              f"横盘{r.get('flat_run')}根 vsMA99 {_f(r.get('pv'))} "
                              f"振幅{(r.get('swing') or 0)*100:.0f}%")
         return "\n".join(lines)
