@@ -151,7 +151,8 @@ def value_board(ranked, entries=None, top=5):
               length, and deeper WINS add nothing once the last round lost)
            + 10 squeeze fuel (funding<0 AND OI 24h>+10%)
            +  8 15m entry timing ready
-           +  5 volume ticking (埋伏★ condition)
+           +  5 volume ticking (first tick; the ambush signal itself
+              needs the 2-scan confirm)
     Each row carries its evidence as human conclusion strings.
 
     Returns (rows, n_candidates). rows are sorted best-first, capped at top.
@@ -198,7 +199,7 @@ def value_board(ranked, entries=None, top=5):
             reasons.append(f"15m 未就绪（价 vs VWAP {vd_s}）——等回上 VWAP 再打")
         if r.get("vol_tick"):
             pts += 5
-            reasons.append("量能抬头中（埋伏★条件）")
+            reasons.append("量能抬头中（待双扫确认＝埋伏触发条件）")
         if not reasons:
             reasons.append(f"新面孔：潜力 {pts:.0f}（弹性×蓄力×燃料），无历史战绩可查")
         note_parts = []

@@ -158,10 +158,18 @@ def _action_cell(r):
 def _disp_label(r):
     lab = r.get("label")
     tm = _timing_mark(r)
+    st = r.get("vt_streak") if isinstance(r.get("vt_streak"), (int, float)) else 0
     if lab == "COILING":
-        return ("🔥埋伏★" if r.get("vol_tick") else "观察") + tm
+        if r.get("vol_tick"):
+            # 埋伏★ is the TRIGGERED signal (2-scan confirmed volume);
+            # a first-scan tick is deliberately NOT 埋伏 — the wording
+            # unification (e5a18a7) reserves 埋伏 for fired signals.
+            return ("🔥埋伏★" if st >= 2 else "量能首现") + tm
+        return "观察" + tm
     if lab == "COILING_LITE":
-        return ("🔵次级★" if r.get("vol_tick") else "次级蓄力") + tm
+        if r.get("vol_tick"):
+            return ("🔵次级★" if st >= 2 else "次级首现") + tm
+        return "次级蓄力" + tm
     base = {"FRESH_LAUNCH": "⚡刚启动", "LAUNCHED": "已启动", "PUMPED": "已拉完",
             "CRASHING": "崩盘中", "LOW_VOL": "低波动", "STABLE": "稳定币",
             "STOCK": "代币股", "UNKNOWN": "未知"}.get(lab, str(lab))
@@ -177,7 +185,11 @@ def build_snapshot(ranked, signals, meta=None):
     meta = meta or {}
     ranked = ranked or []
     n_coins = len(ranked)
-    n_amb = sum(1 for r in ranked if r.get("label") == "COILING" and r.get("vol_tick"))
+    _stk = lambda r: (r.get("vt_streak") if isinstance(r.get("vt_streak"), (int, float)) else 0)
+    n_amb = sum(1 for r in ranked if r.get("label") == "COILING"
+                and r.get("vol_tick") and _stk(r) >= 2)
+    n_first = sum(1 for r in ranked if r.get("label") == "COILING"
+                  and r.get("vol_tick") and _stk(r) < 2)
     n_lite = sum(1 for r in ranked if r.get("label") == "COILING_LITE")
     n_fresh = sum(1 for r in ranked if r.get("label") == "FRESH_LAUNCH")
     try:
@@ -220,6 +232,7 @@ def build_snapshot(ranked, signals, meta=None):
             "attempted": attempted,
             "ranked_count": n_coins,
             "ambush": n_amb,
+            "first_tick": n_first,
             "ambush_lite": n_lite,
             "fresh": n_fresh,
             "sig24": n_sig24,
@@ -284,7 +297,11 @@ def build_dashboard_html(ranked, signals, meta=None):
     interval = meta.get("scan_interval_minutes", 120)
     ranked = ranked or []
     n_coins = len(ranked)
-    n_amb = sum(1 for r in ranked if r.get("label") == "COILING" and r.get("vol_tick"))
+    _stk = lambda r: (r.get("vt_streak") if isinstance(r.get("vt_streak"), (int, float)) else 0)
+    n_amb = sum(1 for r in ranked if r.get("label") == "COILING"
+                and r.get("vol_tick") and _stk(r) >= 2)
+    n_first = sum(1 for r in ranked if r.get("label") == "COILING"
+                  and r.get("vol_tick") and _stk(r) < 2)
     n_lite = sum(1 for r in ranked if r.get("label") == "COILING_LITE")
     n_fresh = sum(1 for r in ranked if r.get("label") == "FRESH_LAUNCH")
     try:
@@ -385,6 +402,7 @@ th{{color:var(--mut);font-weight:600;position:sticky;top:0;background:var(--card
     <div class="kpi">监控币数 <b>{u_size}</b></div>
     <div class="kpi">本轮回测有效 <b style="color:{'#f87171' if (u_size and n_coins < u_size*0.5) else '#fff'}">{n_coins}</b></div>
     <div class="kpi">🔥埋伏★ <b style="color:#f59e0b">{n_amb}</b></div>
+    <div class="kpi">🌱量能首现 <b style="color:#a3e635">{n_first}</b></div>
     <div class="kpi">🔵次级蓄力 <b style="color:#38bdf8">{n_lite}</b></div>
     <div class="kpi">⚡刚启动 <b style="color:#22c55e">{n_fresh}</b></div>
     <div class="kpi">近24h信号 <b>{n_sig24}</b></div>
@@ -395,7 +413,7 @@ th{{color:var(--mut);font-weight:600;position:sticky;top:0;background:var(--card
 </div>
 
 <div class="card">
-  <div class="h2">🔥 可入场列表（埋伏★=量能已抬头并连续 2 扫确认；动作列=直接建议：可入场=信号确认+15m点位共振，挂单等点位=区间内挂单等回踩企稳；⚡=点位就绪，✋=未就绪）</div>
+  <div class="h2">🔥 可入场列表（埋伏★=量能已抬头并连续 2 扫确认；量能首现=仅首扫量能抬头，等下轮确认，尚未触发；动作列=直接建议：可入场=信号确认+15m点位共振，挂单等点位=区间内挂单等回踩企稳；⚡=点位就绪，✋=未就绪）</div>
   <table><tr><th>币种</th><th>标签</th><th>动作</th><th>阶段</th><th>分</th><th>潜力</th><th>证据分</th><th>现价</th><th>vsMA99</th><th>1hMA99</th><th>OI·费率</th><th>~1日</th><th>4h走势</th><th>依据</th></tr>
   {watch_rows}
   </table>
@@ -540,7 +558,7 @@ th{color:var(--mut);font-weight:600;position:sticky;top:0;background:var(--card)
   <div id="health"></div>
 </div>
 <div class="card">
-  <div class="h2">🔥 可入场列表（埋伏★=量能已抬头并连续 2 扫确认；动作列=直接建议：可入场=信号确认+15m点位共振，挂单等点位=区间内挂单等回踩企稳；⚡=点位就绪，✋=未就绪）</div>
+  <div class="h2">🔥 可入场列表（埋伏★=量能已抬头并连续 2 扫确认；量能首现=仅首扫量能抬头，等下轮确认，尚未触发；动作列=直接建议：可入场=信号确认+15m点位共振，挂单等点位=区间内挂单等回踩企稳；⚡=点位就绪，✋=未就绪）</div>
   <div style="margin-bottom:10px"><button id="obsbtn" style="background:#161a22;border:1px solid #1f2937;color:#9ca3af;border-radius:8px;padding:6px 12px;font-size:12px;cursor:pointer">显示未触发的观察池</button> <span id="obscount" style="color:#9ca3af;font-size:11px"></span></div>
   <table><tr><th>币种</th><th>标签</th><th>动作</th><th>阶段</th><th>分</th><th>潜力</th><th>证据分</th><th>现价</th><th>vsMA99</th><th>1hMA99</th><th>OI·费率</th><th>~1日</th><th>4h走势</th><th>依据</th></tr>
   <tbody id="watch"></tbody></table>
@@ -586,8 +604,9 @@ function tmark(r){
 }
 function dispLabel(r){
   var tm=tmark(r);
-  if(r.label==="COILING") return (r.vol_tick?"🔥埋伏★":"观察")+tm;
-  if(r.label==="COILING_LITE") return (r.vol_tick?"🔵次级★":"次级蓄力")+tm;
+  var st=(typeof r.vt_streak==="number")?r.vt_streak:0;
+  if(r.label==="COILING") return (r.vol_tick?(st>=2?"🔥埋伏★":"量能首现"):"观察")+tm;
+  if(r.label==="COILING_LITE") return (r.vol_tick?(st>=2?"🔵次级★":"次级首现"):"次级蓄力")+tm;
   var m={FRESH_LAUNCH:"⚡刚启动",LAUNCHED:"已启动",PUMPED:"已拉完",CRASHING:"崩盘中",LOW_VOL:"低波动",STABLE:"稳定币",STOCK:"代币股",UNKNOWN:"未知"};
   var b=m[r.label]||r.label;
   return r.label==="FRESH_LAUNCH"?b+tm:b;
@@ -671,6 +690,7 @@ function render(d){
     '<div class="kpi">监控币数 <b>'+usz+'</b></div>'+
     '<div class="kpi">本轮回测有效 <b style="color:'+(broken?"#f87171":"#fff")+'">'+rok+'</b></div>'+
     '<div class="kpi">🔥埋伏★ <b style="color:#f59e0b">'+(k.ambush||0)+'</b></div>'+
+    '<div class="kpi">🌱量能首现 <b style="color:#a3e635">'+(k.first_tick||0)+'</b></div>'+
     '<div class="kpi">🔵次级蓄力 <b style="color:#38bdf8">'+(k.ambush_lite||0)+'</b></div>'+
     '<div class="kpi">⚡刚启动 <b style="color:#22c55e">'+(k.fresh||0)+'</b></div>'+
     '<div class="kpi">近24h信号 <b>'+(k.sig24||0)+'</b></div>';

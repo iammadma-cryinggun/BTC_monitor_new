@@ -32,9 +32,31 @@ FakeMonitor.last_ranked = [coin("AAAUSDT", "COILING"), coin("BBBUSDT", "COILING_
 s = ag.ans_ambush()
 check("no-signal default says 无埋伏信号", "当前无埋伏信号" in s and "AAAUSDT" not in s)
 
-# 2) full=True 仍给旧列表
+# 2) full=True 仍给旧列表；星标分层：★=确认（streak>=2），＋=量能首现
+FakeMonitor.last_ranked = [coin("AAAUSDT", "COILING"),
+                            coin("CCCUSDT", "COILING", vol=True, streak=1),
+                            coin("DDDUSDT", "COILING", vol=True, streak=2),
+                            coin("BBBUSDT", "COILING_LITE")]
 s = ag.ans_ambush(full=True)
 check("full=True legacy list", "观察候选列表" in s and "AAAUSDT" in s and "次级蓄力" in s)
+check("star only when streak>=2", "★  DDDUSDT" in s)
+check("plus for first tick", "＋  CCCUSDT" in s)
+
+# 2b) dashboard 标签同语义：埋伏★只给 streak>=2
+import dashboard
+r1 = dict(label="COILING", vol_tick=True, vt_streak=1)
+r2 = dict(label="COILING", vol_tick=True, vt_streak=2)
+r0 = dict(label="COILING", vol_tick=False)
+check("dash tag first-tick", dashboard._disp_label(r1) == "量能首现")
+check("dash tag confirmed", dashboard._disp_label(r2) == "🔥埋伏★")
+check("dash tag plain watch", dashboard._disp_label(r0) == "观察")
+rl1 = dict(label="COILING_LITE", vol_tick=True, vt_streak=1)
+rl2 = dict(label="COILING_LITE", vol_tick=True, vt_streak=2)
+check("dash lite first-tick", dashboard._disp_label(rl1) == "次级首现")
+check("dash lite confirmed", dashboard._disp_label(rl2) == "🔵次级★")
+snap = dashboard.build_snapshot([r1, r2, r0], [])
+check("kpi ambush = confirmed only", snap["kpis"]["ambush"] == 1)
+check("kpi first_tick = 1", snap["kpis"]["first_tick"] == 1)
 
 # 3) go 优先于 wait 优先于 chk
 FakeMonitor.last_ranked = [

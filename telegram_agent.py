@@ -346,7 +346,8 @@ class TelegramAgent:
         if rk:
             lines.append(f"🔥 观察候选列表（{len(rk)} 个，按证据分排序，前 12；均为观察态）：")
             for r in rk[:12]:
-                star = "★" if r.get("vol_tick") else " "
+                _st = r.get("vt_streak") if isinstance(r.get("vt_streak"), (int, float)) else 0
+                star = "★" if (r.get("vol_tick") and _st >= 2) else ("＋" if r.get("vol_tick") else " ")
                 tm = r.get("timing") or {}
                 tmk = "⚡" if tm.get("ready") else ("✋" if tm else " ")
                 fd, oc = r.get("funding"), r.get("oi_chg_24h")
@@ -363,14 +364,16 @@ class TelegramAgent:
                     ev_s = f" 证据{r['ev_pts']:.0f}({r.get('ev_note', '')})"
                 lines.append(f" {star}{tmk} {r['sym']:<13} 潜力{r.get('potential',0):.0f}{ev_s} 分{r['score']:.0f} 价{r['price']:.6g} "
                              f"vsMA99 {_f(r.get('pv'))} 1hM99 {_f(pv1)}{dv_s}")
-            lines.append("★=量能抬头 · ⚡=15m 点位就绪（价>VWAP 且 EMA9>20）· ✋=未就绪。"
+            lines.append("★=埋伏确认（量能连续 2 扫抬头）· ＋=量能首现（等下轮扫描确认）· "
+                         "⚡=15m 点位就绪（价>VWAP 且 EMA9>20）· ✋=未就绪。"
                          "证据分=潜力+历史战绩+逼空燃料+点位（/value 看结论版），潜力=弹性×蓄力×燃料，"
                          "分=信号质量。只盯 ⚡ 打仓位。完整列表看网页看板。")
         if lite:
             lines.append("")
             lines.append(f"🔵 次级蓄力（{len(lite)} 个，大盘币新周期横盘，按证据分前 6，仓位小于主档）：")
             for r in lite[:6]:
-                star = "★" if r.get("vol_tick") else " "
+                _st = r.get("vt_streak") if isinstance(r.get("vt_streak"), (int, float)) else 0
+                star = "★" if (r.get("vol_tick") and _st >= 2) else ("＋" if r.get("vol_tick") else " ")
                 ev_s = ""
                 if isinstance(r.get("ev_pts"), (int, float)):
                     ev_s = f" 证据{r['ev_pts']:.0f}({r.get('ev_note', '')})"
@@ -514,9 +517,9 @@ class TelegramAgent:
 
         label = rec.get("label")
         verdicts = {
-            "COILING_VOL_TICK": "✅ 可以埋伏：横盘蓄力 + 量能抬头（埋伏★条件满足）。\n打法：横盘区内即可分批入场（-20%破位止损，45天等待窗）；\n或等 🚀ENTER（第一根巨量突破）确认后再入——更稳但入场价更高。",
-            "COILING": "🟡 可观察但未触发：在横盘，但量能还没抬头（非埋伏★）。把它放进观察列表等量变。",
-            "COILING_LITE_VOL_TICK": "✅ 次级埋伏：大盘币新周期横盘 + 量能抬头（次级★）。振幅未达妖币门槛，仓位应小于主档。等巨量突破。",
+            "COILING_VOL_TICK": "✅ 接近可埋伏：横盘蓄力 + 量能抬头。\n⚠️ 注意：/check 是单次快照，正式埋伏信号需量能连续 2 扫确认（系统自动判定并推送 🔥 埋伏触发·可入场）。\n打法：横盘区内即可分批入场（-20%破位止损，45天等待窗）；\n或等确认推送 / 🚀ENTER（第一根巨量突破）再入——更稳但入场价更高。",
+            "COILING": "🟡 可观察但未触发：在横盘，但量能还没抬头。把它放进观察列表等量变。",
+            "COILING_LITE_VOL_TICK": "✅ 次级接近可埋伏：大盘币新周期横盘 + 量能抬头（单次快照，双扫确认以推送为准）。振幅未达妖币门槛，仓位应小于主档。等巨量突破。",
             "COILING_LITE": "🔵 次级蓄力可观察：大盘币新周期横盘（振幅未达妖币门槛），量能还没抬头。小仓位观察，等量变。",
             "FRESH_LAUNCH": "🚀 埋伏窗口已过：已启动（S2）。剧本动作是等 S3 洗盘 30-60% 低吸，做 S3→S4。",
             "LAUNCHED": "👀 已启动且动能可能衰减（>8根4h）。关注是否再洗盘，别追高。",
