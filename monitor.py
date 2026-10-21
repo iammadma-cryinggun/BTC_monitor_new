@@ -17,11 +17,12 @@
         🏁 OUT    埋伏闭环：收官（大赢/赢/弱/未走远/破位止损/45天超时）
         （TP/OUT 只对真实信号（live）推送——回填是历史重放，不是你的仓位；
           日报开头另有「📈 战报」栏目汇总近 7 天真实信号的结果）
-        ⚠️ TOP     4h 插针见顶 -> 至少减一半
-        📉 MA25    放量跌破 4h MA25 -> 再减一半 (规则#6)
-        🚪 MA99    跌破 4h MA99 -> 全部离场 (规则#7)
-        🩸 CRASH   崩盘 -> 别接刀
-        ↩️ BOUNCE  崩后巨量反弹 -> 阶段6不是底，别追
+
+Telegram 推送纪律（2026-10-21 用户指令：只要入场/止损/离场/复盘）:
+  只推 PUSH_LEVELS = AMBUSH / AMBUSH_LITE / ENTER（入场）、OUT-pre_fail（止损）、
+  TP + OUT-final（离场）。DIP/TOP/MA25/MA99/CRASH/BOUNCE 等过程事件只进
+  看板信号流（log_signal），不发 Telegram——"事件速览"合并推送已废止。
+  复盘走每日日报战报 + Telegram /review 胜率命令。
   - 每天本地 digest_hour 点推送「当日结论摘要」：价值榜（按历史战绩/燃料/
     点位排序的候选 TOP5）+ 在途埋伏老化结论 + 战报（推荐明细看板/命令里有）
 
@@ -1044,37 +1045,29 @@ class Monitor:
             if emit:
                 self.run_digest()  # give an initial overview on first baseline
         if emit:
-            # Telegram flood control (2026-10-20 incident: a market-wide dump
-            # produced 1016 individual messages in 24h — 99% low-value event
-            # notes, many literally identical to ones sent hours earlier).
-            # Actionable signals (AMBUSH / ENTER / TP / OUT) still go out
-            # individually (ENTER capped at 8 per scan); everything else is
-            # folded into ONE compact per-scan digest. The web signals log
-            # keeps every entry individually — only Telegram is batched.
-            BATCHED_LEVELS = ("DIP", "TOP", "MA25", "MA99", "CRASH", "BOUNCE")
+            # Telegram push policy (2026-10-21 user directive: "我只需要三个
+            # 信息：入场 止损 离场 复盘"): ONLY the closed-loop levels are
+            # pushed to Telegram —
+            #   入场  AMBUSH / AMBUSH_LITE / ENTER (capped at 8 per scan)
+            #   止损  OUT(pre_fail 破位-20%)
+            #   离场  TP(达标止盈) / OUT(收官/超时)
+            # Everything else (DIP/TOP/MA25/MA99/CRASH/BOUNCE event notes) is
+            # logged to the web signals stream but NEVER sent to Telegram —
+            # the old "事件速览" batched digest is gone too. The daily digest
+            # and /review carry the 复盘 (win-rate accountability).
+            PUSH_LEVELS = ("AMBUSH", "AMBUSH_LITE", "ENTER", "TP", "OUT")
             n_enter = 0
-            batch_lines = []
             for lvl, sym, msg, ev in new_signals:
                 self.log_signal(lvl, sym, msg, ev=ev["type"] if isinstance(ev, dict) else None)
-                first_line = msg.split("\n")[0]
-                short = first_line if len(first_line) <= 80 else first_line[:80] + "…"
-                if lvl in BATCHED_LEVELS or (lvl == "ENTER" and n_enter >= 8):
-                    batch_lines.append(f"· {short}")
+                if lvl not in PUSH_LEVELS:
                     continue
                 if lvl == "ENTER":
+                    if n_enter >= 8:
+                        continue
                     n_enter += 1
                 self.notifier.send(
                     f"{SIG_EMOJI.get(lvl,'')} {SIG_TITLE.get(lvl, lvl + ' 信号')} · {sym}",
                     msg, level=lvl)
-            if batch_lines:
-                shown = batch_lines[:40]
-                extra = len(batch_lines) - len(shown)
-                body = "\n".join(shown) + (f"\n…另有 {extra} 条（详见看板信号流）" if extra > 0 else "")
-                self.notifier.send(
-                    "📋 事件速览（本轮合并）",
-                    f"低优先级事件 {len(batch_lines)} 条，已合并推送：\n{body}\n\n"
-                    "（洗盘/插针/破位类事件不再逐条打扰；看板信号流保留全量明细）",
-                    level="info")
         self.write_dashboard()
         return ranked
 

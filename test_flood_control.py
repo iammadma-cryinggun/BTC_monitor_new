@@ -10,8 +10,10 @@ opens, so event_sigs alone cannot dedup them.
 Covers:
   1. fired-event memory: the same event key (sym|TYPE@ts) fires at most ONCE
      even when event_sigs churns (flicker-out then flicker-in).
-  2. batching: DIP/TOP/MA25/MA99/CRASH/BOUNCE collapse into ONE per-scan
-     "事件速览" message; ENTER stays individual (capped at 8).
+  2. push policy (2026-10-21: "我只需要三个信息：入场 止损 离场 复盘"):
+     DIP/TOP/MA25/MA99/CRASH/BOUNCE are logged to the web signals stream
+     but NEVER sent to Telegram — no individual sends, no "事件速览" batch
+     digest either. Only AMBUSH/AMBUSH_LITE/ENTER/TP/OUT go to Telegram.
 
 Run: python test_flood_control.py   (exit 0 = pass)
 """
@@ -96,9 +98,9 @@ check("scan1: state written", os.path.exists(STATE_PATH))
 strip_event_sigs()
 mon.run_scan(emit=True)
 log2 = [s for s in sig_log() if s.get("level") == "MA25"]
-check("scan2: MA25 event fired (first time, into the batch)", len(log2) == 1)
-batch2 = [s for s in mon.notifier.sent if "事件速览" in s[0]]
-check("scan2: merged digest sent", len(batch2) == 1 and "AAAUSDT" in batch2[0][1])
+check("scan2: MA25 event fired into signals log", len(log2) == 1)
+batch2 = [s for s in mon.notifier.sent if "事件速览" in s[0] or "MA25" in s[0]]
+check("scan2: event levels send NOTHING to Telegram (log only)", len(batch2) == 0)
 st = json.load(open(STATE_PATH, encoding="utf-8"))
 fired = st.get("_fired_events", {})
 check("scan2: fired-event ledger persisted",
@@ -115,7 +117,7 @@ new_sends = mon.notifier.sent[n_sends_before:]
 check("scan3: no new messages of any kind for the re-fired event",
       not any("事件速览" in s[0] or "MA25" in s[0] for s in new_sends))
 
-# ---------- scan 4: batched levels never send individually ----------
+# ---------- scan 4: event levels never send individually (or batched) ----------
 def many_events_score(sym, market="futures", force_fetch=False):
     evs = [
         {"type": "MA25_BREAK", "ts": "2026-10-19 04:00:00+00:00", "price": 1.0, "note": "broke"},
@@ -143,15 +145,10 @@ mon2.run_scan(emit=True)
 sends = mon2.notifier.sent
 individual_event = [s for s in sends if any(x in s[0] for x in ("MA25", "TOP", "DIP"))
                     and "速览" not in s[0]]
-check("batch: zero individual MA25/TOP/DIP messages", len(individual_event) == 0)
+check("push policy: zero individual MA25/TOP/DIP messages", len(individual_event) == 0)
 batch_msgs = [s for s in sends if "事件速览" in s[0]]
-check("batch: exactly ONE merged digest message", len(batch_msgs) == 1)
-if batch_msgs:
-    body = batch_msgs[0][1]
-    check("batch: contains all 9 event lines (3 coins x 3 events)",
-          body.count("· ") == 9)
-    check("batch: message body present", len(body) > 200)
-check("batch: signals log keeps all 9 individually",
+check("push policy: no 事件速览 batch digest anymore", len(batch_msgs) == 0)
+check("push policy: signals log keeps all 9 individually",
       len([s for s in sig_log() if s.get("level") in ("MA25", "TOP", "DIP")
            and s.get("sym") in ("BBBUSDT", "CCCUSDT", "DDDUSDT")]) == 9)
 

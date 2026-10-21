@@ -138,6 +138,104 @@ def coin_history(entries, sym):
 
 
 # ----------------------------------------------------------------------------
+# win-rate review: the accountability report ("复盘是为了计算胜率，验证这套
+# 程序是不是成功"). One pass over the tracker, four cuts:
+#   1. outcome distribution — where the settled rounds actually end up
+#   2. overall win rate    — win+win_strong / evaluated (the headline number)
+#   3. monthly trend       — is the edge decaying or compounding?
+#   4. conditional rates   — the recency structure that drives re-entry
+#      scoring (P(win | last round won) vs P(win | losing streak)), computed
+#      live from the current tracker so the numbers self-update.
+# ----------------------------------------------------------------------------
+def win_rate_review(entries):
+    FINAL = ("win_strong", "win", "weak", "miss", "pre_fail", "timeout")
+    WINS = ("win_strong", "win")
+    ent = _entries_or(entries)
+    fins = [e for e in ent if e.get("status") in FINAL]
+
+    def _is_win(e):
+        return e.get("status") in WINS
+
+    # 1. outcome distribution
+    dist = {}
+    for e in fins:
+        dist[e["status"]] = dist.get(e["status"], 0) + 1
+
+    # 2. overall + by source
+    def _cut(pool):
+        if not pool:
+            return None
+        w = sum(1 for e in pool if _is_win(e))
+        g = [e.get("peak_gain") for e in pool
+             if isinstance(e.get("peak_gain"), (int, float))]
+        launched = [e for e in pool if e.get("status") not in
+                    ("pre_fail", "timeout")]
+        return dict(n=len(pool), wins=w, rate=round(w / len(pool), 3),
+                    avg_peak=round(sum(g) / len(g), 3) if g else None,
+                    launch_rate=round(len(launched) / len(pool), 3) if pool else None)
+
+    overall = _cut(fins)
+    by_src = {s: _cut([e for e in fins if e.get("source") == s])
+              for s in ("live", "backfill")}
+
+    # 3. monthly trend (settled count + win rate per entry month)
+    monthly = {}
+    for e in fins:
+        m = (e.get("ts") or "")[:7]
+        if not m:
+            continue
+        d = monthly.setdefault(m, dict(n=0, wins=0))
+        d["n"] += 1
+        if _is_win(e):
+            d["wins"] += 1
+    for m, d in monthly.items():
+        d["rate"] = round(d["wins"] / d["n"], 3) if d["n"] else None
+
+    # 4. conditional: per coin, walk settled rounds in ts order; the outcome
+    # of round i-1 conditions round i. This recomputes the exact numbers the
+    # 2026-10-20 review found (70% / 39% / 12%) from whatever the tracker
+    # holds today, so the scoring rules stay accountable over time.
+    by_coin = {}
+    for e in fins:
+        by_coin.setdefault(e.get("sym"), []).append(e)
+    cond = dict(last_win=dict(n=0, wins=0), lose1=dict(n=0, wins=0),
+                lose2p=dict(n=0, wins=0), fresh=dict(n=0, wins=0))
+    for sym, rounds in by_coin.items():
+        rounds.sort(key=lambda x: x.get("ts") or "")
+        for i, e in enumerate(rounds):
+            if i == 0:
+                bucket = "fresh"
+            else:
+                prev = rounds[i - 1]
+                if _is_win(prev):
+                    bucket = "last_win"
+                else:
+                    streak = 1
+                    j = i - 2
+                    while j >= 0 and not _is_win(rounds[j]):
+                        streak += 1
+                        j -= 1
+                    bucket = "lose1" if streak == 1 else "lose2p"
+            cond[bucket]["n"] += 1
+            if _is_win(e):
+                cond[bucket]["wins"] += 1
+    for d in cond.values():
+        d["rate"] = round(d["wins"] / d["n"], 3) if d["n"] else None
+
+    delays = [e["launch_delay_d"] for e in ent
+              if isinstance(e.get("launch_delay_d"), (int, float))]
+    return dict(
+        total=len(ent),
+        open_waiting=sum(1 for e in ent if e.get("status") == "waiting"),
+        open_launched=sum(1 for e in ent if e.get("status") == "launched"),
+        evaluated=len(fins), dist=dist, overall=overall, by_src=by_src,
+        monthly=dict(sorted(monthly.items())),
+        cond=cond,
+        avg_delay=round(sum(delays) / len(delays), 1) if delays else None,
+    )
+
+
+# ----------------------------------------------------------------------------
 # the value board: rank the current coiling candidates by EVIDENCE
 # ----------------------------------------------------------------------------
 def value_board(ranked, entries=None, top=5):

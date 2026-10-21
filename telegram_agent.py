@@ -17,7 +17,10 @@ Commands (slash or natural language):
   /value 价值榜/值得埋谁       — EVIDENCE-ranked ambush board + aging verdicts
   /ambush [all] 可入场信号       — ACTIONABLE coins only (default);
                                    /ambush all = full raw watch list
-  /track [SYM] 追踪/复盘/胜率 — ambush tracker stats, or one symbol's calls
+  /track [SYM] 追踪            — ambush tracker stats, or one symbol's calls
+  /review 复盘/胜率            — win-rate accountability report (outcome
+                                   distribution, monthly trend, conditional
+                                   re-entry rates — "验证程序是不是成功")
   /check SYM                  — live re-score + "还能埋伏吗" verdict
   "<SYM> 还能埋伏吗 / 怎么样" — same as /check
   "失效" (with or w/o SYM)    — "信号失效了吗": tracker entry status
@@ -39,8 +42,9 @@ HELP = (
     "/status 或 状态 — 扫描概况\n"
     "/ambush 或 可入场/埋伏 — 当前可入场信号（默认只显示量能抬头的行动币；无信号时直说）\n"
     "/ambush all — 全量观察列表（原始数据，均为观察态）\n"
-    "/track 或 追踪/复盘 — 埋伏信号自检统计\n"
+    "/track 或 追踪 — 埋伏信号自检统计\n"
     "/track BANKUSDT — 该币历次埋伏追踪明细\n"
+    "/review 或 复盘/胜率 — 胜率复盘报告：结局分布·按月趋势·条件胜率（验证这套程序成不成功）\n"
     "/check BANKUSDT — 实时重扫该币 + 还能埋伏吗判定\n"
     "或直接说：\"BANKUSDT 还能埋伏吗\" / \"BANKUSDT 信号失效了吗\" / \"BANKUSDT 怎么样\"\n\n"
     "判定口径全部来自六阶段状态机 + 追踪器，数据与看板/日报同源。"
@@ -197,6 +201,8 @@ class TelegramAgent:
                 return self.ans_ambush(full=full)
             if cmd == "/track":
                 return self.ans_track(args[0].upper() if args else None)
+            if cmd == "/review":
+                return self.ans_review()
             if cmd == "/check":
                 if not args:
                     return "用法：/check BANKUSDT"
@@ -211,7 +217,9 @@ class TelegramAgent:
             return self.ans_check(sym)
         if any(k in t for k in ("价值", "值得", "推荐", "结论", "埋谁", "该埋")):
             return self.ans_value()
-        if any(k in t for k in ("追踪", "复盘", "胜率", "自检")):
+        if any(k in t for k in ("复盘", "胜率")):
+            return self.ans_review()
+        if "追踪" in t or "自检" in t:
             return self.ans_track(None)
         if "埋伏" in t or "可入场" in t or "入场" in t:
             return self.ans_ambush()
@@ -432,6 +440,81 @@ class TelegramAgent:
             if new_today:
                 lines.append(f"今天新增等待：{', '.join(sorted({e['sym'] for e in new_today})[:10])}"
                              + ("…" if len({e['sym'] for e in new_today}) > 10 else ""))
+        return "\n".join(lines)
+
+    def ans_review(self):
+        """胜率复盘报告（2026-10-21 用户指令：复盘是为了计算胜率，验证这套
+        程序是不是成功）。四刀切：结局分布 / 整体胜率 / 按月趋势 / 条件胜率。
+        数据直接来自当前 tracker，每次发问实时重算。"""
+        try:
+            rv = insights.win_rate_review(ambush_tracker.load()["entries"])
+        except Exception as e:
+            return f"复盘计算失败：{e}"
+        if not rv["evaluated"]:
+            return (f"追踪器共 {rv['total']} 笔（在途 {rv['open_waiting']}），"
+                    "还没有已结算的完整轮次，胜率暂无可算——结算自动进行，"
+                    "一段时间后再发 /review。")
+        lines = [f"📊 胜率复盘 · 已结算 {rv['evaluated']} 轮（tracker 共 {rv['total']} 笔，"
+                 f"在途等待 {rv['open_waiting']} / 已启动 {rv['open_launched']}）"]
+        # 1. outcome distribution
+        _CN = {"win_strong": "✅ 大赢(+80%)", "win": "✅ 赢(+30%)",
+               "weak": "🟡 弱(+10%)", "miss": "⚪ 启动未走远",
+               "pre_fail": "🩸 破位止损(-20%)", "timeout": "⏳ 45天超时"}
+        seg = " ｜ ".join(f"{_CN[k]} {v}笔({v/rv['evaluated']:.0%})"
+                         for k, v in sorted(rv["dist"].items(),
+                                            key=lambda kv: -kv[1]))
+        lines.append(f"结局分布：{seg}")
+        # 2. overall + per-source
+        ov = rv["overall"] or {}
+        ap = f"{ov.get('avg_peak', 0):+.0%}" if ov.get("avg_peak") is not None else "—"
+        lr = f"{ov.get('launch_rate', 0):.0%}" if ov.get("launch_rate") is not None else "—"
+        lines.append(f"整体胜率 {ov.get('rate', 0):.0%}（赢+大赢 / 已结算）· "
+                     f"平均峰值 {ap} · 启动率 {lr}"
+                     + (f" · 平均启动延迟 {rv['avg_delay']}天" if rv.get("avg_delay") is not None else ""))
+        for src, label in (("live", "实盘"), ("backfill", "回填")):
+            c = (rv["by_src"] or {}).get(src)
+            if c and c["n"]:
+                cap = f"{c['rate']:.0%}"
+                lines.append(f"  {label}：{c['n']} 轮 · 胜率 {cap}"
+                             + (f" · 平均峰值 {c['avg_peak']:+.0%}"
+                                if c.get("avg_peak") is not None else ""))
+        # 3. monthly trend (last 8 months)
+        mon = list((rv["monthly"] or {}).items())[-8:]
+        if len(mon) >= 2:
+            seg = " ｜ ".join(f"{m}: {d['rate']:.0%}(n={d['n']})"
+                             for m, d in mon if d.get("rate") is not None)
+            if seg:
+                lines.append(f"按月胜率：{seg}")
+        # 4. conditional rates — the re-entry scoring evidence
+        cond = rv["cond"] or {}
+        def _cs(k, label):
+            d = cond.get(k) or {}
+            if not d.get("n"):
+                return None
+            return f"{label} {d['rate']:.0%}（n={d['n']}）"
+        parts = [x for x in (_cs("last_win", "上轮胜→"),
+                             _cs("fresh", "无历史首战→"),
+                             _cs("lose1", "上轮败→"),
+                             _cs("lose2p", "连败≥2→")) if x]
+        if parts:
+            lines.append("条件胜率（重入评分依据）：" + " ｜ ".join(parts))
+        # verdict: honest, numbers-first
+        lw = (cond.get("last_win") or {}).get("rate")
+        fr = (cond.get("fresh") or {}).get("rate")
+        l2 = (cond.get("lose2p") or {}).get("rate")
+        verdict = []
+        if isinstance(lw, float) and isinstance(fr, float) and fr > 0:
+            verdict.append(f"重入规则{'有效' if lw > fr + 0.1 else '失效'}"
+                           f"（上轮胜 {lw:.0%} vs 首战 {fr:.0%}）")
+        if isinstance(l2, float):
+            verdict.append("连败降权规则有效" if l2 < 0.15 else "连败降权依据不足")
+        if ov.get("avg_peak") is not None:
+            verdict.append("平均峰值为正，策略期望为正" if ov["avg_peak"] > 0
+                           else "⚠️ 平均峰值为负，策略当前期望为负")
+        if verdict:
+            lines.append("结论：" + "；".join(verdict)
+                         + "。（口径提醒：胜=峰值曾达+30%，不保证满仓吃到；滑点会吃掉一部分）")
+        lines.append("每日战报在日报里；单币明细 /track 币名。")
         return "\n".join(lines)
 
     def ans_invalid(self, sym):
