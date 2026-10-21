@@ -15,7 +15,8 @@ Commands (slash or natural language):
   /help 帮助                  — this list
   /status 状态                — scan summary / pool / label counts
   /value 价值榜/值得埋谁       — EVIDENCE-ranked ambush board + aging verdicts
-  /ambush 候选列表            — candidate watch list (raw, full)
+  /ambush [all] 可入场信号       — ACTIONABLE coins only (default);
+                                   /ambush all = full raw watch list
   /track [SYM] 追踪/复盘/胜率 — ambush tracker stats, or one symbol's calls
   /check SYM                  — live re-score + "还能埋伏吗" verdict
   "<SYM> 还能埋伏吗 / 怎么样" — same as /check
@@ -36,7 +37,8 @@ HELP = (
     "直接发消息问我（只读，不代下单）：\n\n"
     "/value 或 价值榜/值得埋谁 — 结论版：按历史战绩排序的价值榜+老化提醒\n"
     "/status 或 状态 — 扫描概况\n"
-    "/ambush 或 候选列表 — 当前观察候选（全量原始列表，均为观察态；触发推送看 🔥AMBUSH 信号）\n"
+    "/ambush 或 可入场/埋伏 — 当前可入场信号（默认只显示量能抬头的行动币；无信号时直说）\n"
+    "/ambush all — 全量观察列表（原始数据，均为观察态）\n"
     "/track 或 追踪/复盘 — 埋伏信号自检统计\n"
     "/track BANKUSDT — 该币历次埋伏追踪明细\n"
     "/check BANKUSDT — 实时重扫该币 + 还能埋伏吗判定\n"
@@ -191,7 +193,8 @@ class TelegramAgent:
             if cmd == "/value":
                 return self.ans_value()
             if cmd == "/ambush":
-                return self.ans_ambush()
+                full = any(a.lower() in ("all", "全", "全量", "all列表") for a in args)
+                return self.ans_ambush(full=full)
             if cmd == "/track":
                 return self.ans_track(args[0].upper() if args else None)
             if cmd == "/check":
@@ -210,8 +213,10 @@ class TelegramAgent:
             return self.ans_value()
         if any(k in t for k in ("追踪", "复盘", "胜率", "自检")):
             return self.ans_track(None)
-        if "埋伏" in t or "候选" in t:
+        if "埋伏" in t or "可入场" in t or "入场" in t:
             return self.ans_ambush()
+        if "候选" in t:
+            return self.ans_ambush(full=True)
         if "状态" in t or low == "status":
             return self.ans_status()
         if any(k in t for k in ("你好", "hi", "hello")):
@@ -268,10 +273,33 @@ class TelegramAgent:
             lines.append("")
             lines += ag
         lines.append("")
-        lines.append("全量原始列表：/ambush；单个币判定：/check 币名；明细看板 https://yaobi.zeabur.app/")
+        lines.append("全量观察列表：/ambush all；单个币判定：/check 币名；明细看板 https://yaobi.zeabur.app/")
         return "\n".join(lines)
 
-    def ans_ambush(self):
+    def _action_of(self, r):
+        """Mirror of the dashboard action column: collapse volume-signal x
+        15m-timing into ONE verdict. Returns (key, text) or (None, None)
+        when the coin is not actionable right now."""
+        lab = r.get("label")
+        vt = bool(r.get("vol_tick"))
+        st = r.get("vt_streak") if isinstance(r.get("vt_streak"), (int, float)) else 0
+        t = r.get("timing") or {}
+        has_t = t.get("ready") in (True, False)
+        if lab == "COILING" and vt:
+            if st >= 2:
+                return ("go", "✅ 可入场") if (has_t and t.get("ready")) else ("wait", "⏳ 挂单等点位（等回踩企稳）")
+            return ("chk", "👀 量能首现·等下轮确认")
+        if lab == "COILING_LITE" and vt:
+            if st >= 2:
+                return ("go2", "✅ 次级可入场·半仓") if (has_t and t.get("ready")) else ("wait", "⏳ 次级·挂单等点位")
+            return ("chk", "👀 次级·量能首现")
+        return (None, None)
+
+    def ans_ambush(self, full=False):
+        """Action-first (2026-10-21 user review: "我只需要确切的入场信息").
+        Default shows ONLY coins with volume ticking (the ambush-eligible
+        slice) each carrying a one-line verdict; full=True keeps the legacy
+        raw watch list for completeness."""
         def _evkey(r):
             if isinstance(r.get("ev_pts"), (int, float)):
                 return -r["ev_pts"]
@@ -283,6 +311,37 @@ class TelegramAgent:
                        if r.get("label") == "COILING_LITE"], key=_evkey)
         if not rk and not lite:
             return "当前没有 COILING（横盘蓄力）币。"
+
+        if not full:
+            act = [(self._action_of(r), r) for r in rk + lite]
+            act = [(k, txt, r) for (k, txt), r in act if k]
+            if not act:
+                n_first = sum(1 for r in rk + lite if r.get("vol_tick"))
+                return ("当前无埋伏信号——量能全部未抬头，无可入场标的。\n"
+                        f"（观察池 {len(rk)} 蓄力 + {len(lite)} 次级；量能首现 {n_first} 个。"
+                        "触发即推送 🔥 埋伏触发·可入场，无需盯盘。）\n"
+                        "全量观察列表：/ambush all")
+            order = {"go": 0, "go2": 1, "wait": 2, "chk": 3}
+            act.sort(key=lambda x: (order.get(x[0], 9), _evkey(x[2])))
+            lines = [f"🔥 可入场信号（{len(act)} 个，按动作优先级排序）："]
+            for k, txt, r in act[:15]:
+                fd, oc = r.get("funding"), r.get("oi_chg_24h")
+                dv = []
+                if isinstance(fd, (int, float)):
+                    dv.append(f"费率{fd*100:+.3f}%")
+                if isinstance(oc, (int, float)):
+                    dv.append(f"OI{oc*100:+.0f}%")
+                dv_s = ("·" + "·".join(dv)) if dv else ""
+                ev_s = ""
+                if isinstance(r.get("ev_pts"), (int, float)):
+                    ev_s = f" 证据{r['ev_pts']:.0f}({r.get('ev_note', '')})"
+                lines.append(f" {txt} {r['sym']:<13} 潜力{r.get('potential',0):.0f}{ev_s} "
+                             f"价{r['price']:.6g} vsMA99 {_f(r.get('pv'))}{dv_s}")
+            lines.append("✅=信号确认+15m点位共振，现在可打仓 · ⏳=信号确认但点位未就绪，挂单位等回踩 · "
+                         "👀=量能首现（防闪烁需连续2扫确认），等下一轮扫描。"
+                         "只盯 ✅ 打仓位。全量观察：/ambush all")
+            return "\n".join(lines)
+
         lines = []
         if rk:
             lines.append(f"🔥 观察候选列表（{len(rk)} 个，按证据分排序，前 12；均为观察态）：")
