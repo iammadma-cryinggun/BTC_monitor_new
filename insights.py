@@ -303,7 +303,8 @@ def value_board(ranked, entries=None, top=5):
         tm = r.get("timing") or {}
         if tm.get("ready"):
             pts += 8
-            reasons.append("15m 点位就绪（价>VWAP·EMA9>20）——现在就是打仓位的位置")
+            reasons.append("15m 点位就绪（价>VWAP·EMA9>20）——仅点位条件满足，"
+                           "入场仍须埋伏★量能双扫确认")
         elif tm:
             vd = tm.get("vwap_dist")
             vd_s = f"{vd*100:+.1f}%" if isinstance(vd, (int, float)) else "?"
@@ -382,6 +383,16 @@ def aging_lines(entries=None, lw=None, now=None):
               if e.get("source") == "live" and e.get("status") == "waiting"]
     if not live_w:
         return []
+    # dedupe by sym: a coin can carry several waiting rows (re-entry or
+    # flicker artifacts) — that put SOLUSDT twice in one bucket and
+    # OGUSDT in two buckets at once. Keep the LATEST call per coin so
+    # the age verdict reflects the most recent signal.
+    by_sym = {}
+    for e in live_w:
+        s = e.get("sym")
+        if s not in by_sym or (e.get("ts") or "") > (by_sym[s].get("ts") or ""):
+            by_sym[s] = e
+    live_w = list(by_sym.values())
     aged = [(_age_days(e.get("ts"), now), e) for e in live_w]
     fresh = sorted(e["sym"] for a, e in aged if a is not None and a <= GOLDEN_D)
     mid = sorted(e["sym"] for a, e in aged if a is not None and GOLDEN_D < a <= AGING_D)
