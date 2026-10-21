@@ -275,6 +275,30 @@ def event_sig(e):
     return f"{e.get('type')}@{e.get('ts')}"
 
 
+def _fill_oi_on_trigger(rec):
+    """2026-10-21 review follow-up: on-demand OI for TRIGGERED coins.
+
+    The derivatives pass budgets OI history to the top-100 by potential, so
+    coins that fire AMBUSH from outside that slice (or whose OI call failed
+    during the pass) got recorded WITHOUT oi_chg_24h — production check on
+    2026-10-21: only 4/17 new live entries had OI, yet ALL 13 missing
+    symbols had full 42-bar history on Binance. One extra call per trigger
+    (~17/day) is negligible, so fetch it here just before record_entry.
+    Deliberately does NOT recompute potential — the Telegram message
+    already went out with the pre-OI context; this is for the tracker's
+    calibration record (and the value board's squeeze-fuel bonus on the
+    NEXT scan, when the coin re-enters the deriv slice with OI attached).
+    """
+    if not isinstance(rec, dict) or "oi_chg_24h" in rec:
+        return
+    try:
+        oc = fetch_oi_change(rec.get("sym", ""))
+        if oc is not None:
+            rec["oi_chg_24h"] = round(oc, 4)
+    except Exception:
+        pass
+
+
 def timing_gate(sym, market="futures", btc_regime=None, kind="enter"):
     """One-line 15m entry-timing verdict (VWAP + 9/20 EMA gate). Empty on failure.
 
@@ -950,10 +974,12 @@ class Monitor:
                 if lvl == "AMBUSH":
                     rec = next((r for r in ranked if r["sym"] == sym), None)
                     if rec is not None:
+                        _fill_oi_on_trigger(rec)
                         ambush_tracker.record_entry(rec)
                 elif lvl == "AMBUSH_LITE":
                     rec = next((r for r in ranked if r["sym"] == sym), None)
                     if rec is not None:
+                        _fill_oi_on_trigger(rec)
                         ambush_tracker.record_entry(rec, tier="lite")
             res = ambush_tracker.update(ranked)
             outcome_events = res[1] if isinstance(res, tuple) else []

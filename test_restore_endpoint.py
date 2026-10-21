@@ -118,6 +118,31 @@ check("export: exported file equals what restore wrote",
       json.loads(raw.decode("utf-8")).get("entries") ==
       json.load(open(os.path.join(tmp, "ambush_track.json"), encoding="utf-8")).get("entries"))
 
+# ---------- part 1c: regime_log rides along (2026-10-21) ----------
+REGIME = {"entries": BACKUP["entries"],
+          "regime_log": [dict(ts="2026-10-21T01:00:00+00:00", n=513, btc="neutral",
+                              coiling=0.61, lite=0.17),
+                         dict(ts="2026-10-21T03:00:00+00:00", n=513, btc="bullish",
+                              coiling=0.63, lite=0.16)]}
+st, out = post("/restore_track?force=1", json.dumps(REGIME))
+check("restore with regime_log -> 200, 2 rows folded",
+      st == 200 and out.get("ok") and out.get("regime_log") == 2)
+pure = json.load(open(os.path.join(tmp, "ambush_track.json"), encoding="utf-8"))
+check("tracker file stays pure (no regime_log key)", "regime_log" not in pure)
+rl = json.load(open(os.path.join(tmp, "regime_log.json"), encoding="utf-8"))
+check("regime_log.json written with 2 rows", isinstance(rl, list) and len(rl) == 2)
+st, out = post("/restore_track?force=1", json.dumps(REGIME))
+check("re-restore dedupes regime rows (0 new)",
+      st == 200 and out.get("regime_log") == 0)
+st, raw = get("/export_track?with_regime=1")
+ex = json.loads(raw.decode("utf-8"))
+check("export ?with_regime=1 carries regime_log (2 rows)",
+      st == 200 and len(ex.get("regime_log") or []) == 2
+      and len(ex.get("entries") or []) == 2)
+st, raw = get("/export_track")
+check("plain export stays pure (no regime_log key)",
+      "regime_log" not in json.loads(raw.decode("utf-8")))
+
 del os.environ["RESTORE_TOKEN"]
 st, out = post("/restore_track", BODY, token=None)
 check("env unset -> endpoint disabled 403", st == 403 and "RESTORE_TOKEN" in out.get("error", ""))

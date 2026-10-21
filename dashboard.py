@@ -744,6 +744,12 @@ class DashboardServer:
                 POST /restore_track[?force=1|?merge=1]
                   header  X-Restore-Token: <RESTORE_TOKEN env var>
                   body    raw JSON {"entries":[...]} (an ambush_track.json)
+                          optionally with a sibling "regime_log":[...] key —
+                          merged into data/regime_log.json (dedupe by ts,
+                          cap 2000) so the regime observation log survives
+                          volume wipes together with the tracker
+                          (2026-10-21: it lived on the same wiped volume
+                          and was silently lost on every redeploy).
                 Guards: token must match RESTORE_TOKEN (endpoint disabled
                 entirely when unset); a NON-empty existing tracker is refused
                 unless ?force=1 (overwrite) or ?merge=1 (union — entries are
@@ -773,6 +779,12 @@ class DashboardServer:
                     entries = store.get("entries")
                     if not isinstance(entries, list) or not entries:
                         raise ValueError("body has no entries")
+                    # optional sibling key: regime observation rows to fold
+                    # into data/regime_log.json (captured BEFORE the merge
+                    # path below reassigns `store` from the on-disk tracker)
+                    regime_rows = store.get("regime_log")
+                    if not isinstance(regime_rows, list):
+                        regime_rows = None
                     cur = os.path.join(data_dir, "ambush_track.json")
                     if os.path.exists(cur) and not force and not merge:
                         try:
@@ -803,12 +815,41 @@ class DashboardServer:
                             self._reply_json(500, {"ok": False,
                                                    "error": f"merge failed: {e}"})
                             return
+                    store.pop("regime_log", None)  # tracker file stays pure
                     tmp = cur + ".tmp"
                     with open(tmp, "w", encoding="utf-8") as f:
                         json.dump(store, f, indent=2, ensure_ascii=False, default=str)
                     os.replace(tmp, cur)
                     print(f"[restore] ambush_track.json restored via POST: {len(entries)} entries")
-                    self._reply_json(200, {"ok": True, "restored": len(entries)})
+                    n_regime = 0
+                    if regime_rows:
+                        try:
+                            rp = os.path.join(data_dir, "regime_log.json")
+                            cur_rows = []
+                            if os.path.exists(rp):
+                                try:
+                                    with open(rp, encoding="utf-8") as rf:
+                                        cur_rows = json.load(rf) or []
+                                except Exception:
+                                    cur_rows = []
+                            if not isinstance(cur_rows, list):
+                                cur_rows = []
+                            have_ts = {str(r.get("ts")) for r in cur_rows
+                                       if isinstance(r, dict)}
+                            add = [r for r in regime_rows
+                                   if isinstance(r, dict)
+                                   and str(r.get("ts")) not in have_ts]
+                            merged_rows = (cur_rows + add)[-2000:]
+                            rtmp = rp + ".tmp"
+                            with open(rtmp, "w", encoding="utf-8") as rf:
+                                json.dump(merged_rows, rf, ensure_ascii=False)
+                            os.replace(rtmp, rp)
+                            n_regime = len(add)
+                            print(f"[restore] regime_log merged: {n_regime} new rows")
+                        except Exception as e:
+                            print(f"[restore] regime_log merge failed: {e}")
+                    self._reply_json(200, {"ok": True, "restored": len(entries),
+                                           "regime_log": n_regime})
                 except Exception as e:
                     self._reply_json(400, {"ok": False, "error": str(e)})
 
@@ -832,7 +873,12 @@ class DashboardServer:
                     endpoint lets a FRESH snapshot be pulled anytime:
                       GET /export_track   header X-Restore-Token: <token>
                                           or /export_track?token=<token>
-                    Returns the raw ambush_track.json bytes (attachment)."""
+                    Returns the raw ambush_track.json bytes (attachment).
+                    Add &with_regime=1 (2026-10-21) to inject the sibling
+                    data/regime_log.json under a "regime_log" key in the
+                    RESPONSE only — the on-disk tracker stays pure. Feed
+                    that key back through POST /restore_track to restore
+                    both files after a volume wipe."""
                     token = os.environ.get("RESTORE_TOKEN", "").strip()
                     if not token:
                         self._reply_json(403, {"ok": False,
@@ -850,6 +896,19 @@ class DashboardServer:
                         return
                     with open(cur, "rb") as f:
                         body = f.read()
+                    if "with_regime=1" in qs:
+                        # inject the regime log into the RESPONSE payload
+                        # only; the tracker file on disk is never touched
+                        try:
+                            obj = json.loads(body.decode("utf-8"))
+                            rp = os.path.join(data_dir, "regime_log.json")
+                            if os.path.exists(rp):
+                                with open(rp, encoding="utf-8") as rf:
+                                    obj["regime_log"] = json.load(rf) or []
+                            body = json.dumps(obj, ensure_ascii=False,
+                                              indent=2, default=str).encode("utf-8")
+                        except Exception as e:
+                            print(f"[export] regime inject failed ({e}); raw tracker")
                     self.send_response(200)
                     self.send_header("Content-Type", "application/json; charset=utf-8")
                     self.send_header("Content-Disposition",
