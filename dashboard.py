@@ -226,7 +226,7 @@ def build_snapshot(ranked, signals, meta=None):
         ambush = {
             "stats": ambush_tracker.stats(store=_store),
             "entries": _open[-30:],          # oldest first = closest to timeout
-            "recent_finals": _fin[:10],
+            "recent_finals": _fin[:20],   # 2026-10-21 止损潮：10 行装不下，MITO 收官被挤掉 → Telegram 推了网页没有
             "review": _ins2.win_rate_review(_ent),
         }
     except Exception:

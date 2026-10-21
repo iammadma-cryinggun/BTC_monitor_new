@@ -106,11 +106,27 @@ def launch_window_note(lw):
 # every ranked rec (streak>=2 AND persisted >= CONFIRM_MIN_H); older callers
 # and test fixtures that only carry vt_streak fall back to streak>=2.
 # ----------------------------------------------------------------------------
+# 2026-10-21 MITO/PTB 教训：COILING 标签只查 20d swing（妖币门槛），暴跌当天落回
+# S1 就能拿标签（flat_run=0、区间 36% 宽）——崩塌量被 vol_tick 当成量能抬头。
+# 埋伏★（确认态）额外要求横盘本身成熟：flat_run>=2 根 4h（8 小时真盘整）且
+# 区间 <=20%。monitor 的发射端用同一对常量（monitor.py classify），保持推送与
+# 面板显示一致。
+AMBUSH_MIN_FLAT = 2       # 根 4h：横盘至少成立 2 根收盘才算蓄力
+AMBUSH_MAX_RANGE = 0.20   # 横盘区间宽度上限：>20% 是崩塌余波不是蓄力
+
+
 def vol_confirmed(r):
     v = r.get("vt_confirmed")
-    if v is not None:
-        return bool(v)
-    return (r.get("vt_streak") or 0) >= 2
+    ok = bool(v) if v is not None else (r.get("vt_streak") or 0) >= 2
+    if ok and r.get("label") == "COILING":
+        # maturity gates (main tier only; LITE tier already gates at label time)
+        flat = r.get("flat_run")
+        rng = r.get("range_w")
+        if flat is not None and flat < AMBUSH_MIN_FLAT:
+            return False
+        if rng is not None and rng > AMBUSH_MAX_RANGE:
+            return False
+    return ok
 
 
 # ----------------------------------------------------------------------------

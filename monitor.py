@@ -115,16 +115,38 @@ def enter_hit_note(entry):
 
 def reentry_note(prev):
     """Append to an AMBUSH message when this coin had a prior (final) episode."""
+    # 2026-10-21 PTB 教训：该币历史 7 轮连续破位，注记却说「值得比新面孔多一分
+    # 信任」——与我们自己的条件胜率（连败>=2 -> 8%）直接矛盾。先数连败尾巴：
+    # 连败>=2 时改发警告，不再发信任话术。日期 bug 一并修：展示的是上一轮的
+    # 「入场日」（用户关心的是哪天埋的那轮），不是收官日。
+    sym = prev.get("sym")
+    streak = 0
+    try:
+        import ambush_tracker as _at
+        _fins = [e for e in _at.load()["entries"]
+                 if e.get("sym") == sym
+                 and e.get("status") not in ("waiting", "launched")]
+        _fins.sort(key=lambda e: e.get("final_ts") or e.get("ts") or "")
+        for e in reversed(_fins):
+            if e.get("status") == "pre_fail":
+                streak += 1
+            else:
+                break
+    except Exception:
+        streak = 0
+    if streak >= 2:
+        return (f"\n⚠️ 该币最近 {streak} 轮连续破位失败——历史连败≥2 的再入场胜率仅 8%。"
+                f"确定性优先：除非有强理由，这一轮放过。")
     try:
         import ambush_tracker as _at
         cn = _at.STATUS_CN.get(prev.get("status"), prev.get("status"))
     except Exception:
         cn = prev.get("status")
     pg = prev.get("peak_gain")
-    day = (prev.get("final_ts") or prev.get("ts") or "")[:10]
+    day = (prev.get("ts") or prev.get("final_ts") or "")[:10]
     src = "" if prev.get("source") == "live" else "（回填战绩）"
     pgs = f"，峰值 {_fmt_pct(pg)}" if isinstance(pg, (int, float)) else ""
-    return (f"\n♻️ 重入：该币上一轮埋伏（{day}）= {cn}{pgs}{src}。"
+    return (f"\n♻️ 重入：该币上一轮埋伏（{day} 入场）= {cn}{pgs}{src}。"
             f"同币新周期重复启动历史上贡献了最大复利——值得比新面孔多一分信任。")
 
 
@@ -431,7 +453,31 @@ def classify(sym, rec, prev, btc_regime=None, market="futures"):
     _prev_conf = prev.get("vt_confirmed") if prev else None
     if _prev_conf is None:
         _prev_conf = ((prev.get("vt_streak") or 0) >= 2) if prev else False
-    if (rec["label"] == "COILING" and _conf and not _prev_conf):
+    # 2026-10-21 MITO/PTB 教训：COILING 标签只查 20d swing，暴跌当天落回 S1 即
+    # 拿标签（flat_run=0、区间 36-39% 宽）——崩塌量被 vol_tick 当成量能抬头，
+    # 双扫后给正在下落的刀发了「可入场」。发射改用 eligible 边沿：确认之外还
+    # 要求横盘成熟（flat_run>=AMBUSH_MIN_FLAT 且 range_w<=AMBUSH_MAX_RANGE，
+    # 常量与 insights.vol_confirmed 同源）。确认早于成熟时（崩后首日确认），
+    # 等成熟那一扫再发射——信号不会丢，只是不再抢跑。
+    try:
+        import insights as _ins
+        _min_flat = _ins.AMBUSH_MIN_FLAT
+        _max_range = _ins.AMBUSH_MAX_RANGE
+    except Exception:
+        _min_flat, _max_range = 2, 0.20
+
+    def _mature(d):
+        flat = d.get("flat_run")
+        rng = d.get("range_w")
+        if flat is not None and flat < _min_flat:
+            return False
+        if rng is not None and rng > _max_range:
+            return False
+        return True
+
+    _elig = _conf and _mature(rec)
+    _prev_elig = bool(_prev_conf and _mature(prev)) if prev else False
+    if (rec["label"] == "COILING" and _elig and not _prev_elig):
         pv = rec.get("pv")
         pv_s = f"{pv*100:+.0f}%" if pv is not None else "n/a"
         # derivatives context: negative funding + rising OI while coiling =
@@ -1121,8 +1167,14 @@ class Monitor:
                     if n_enter >= 8:
                         continue
                     n_enter += 1
+                # 2026-10-21 用户抓到的矛盾：标题「埋伏触发·可入场」+ 正文「✋
+                # 点位未就绪……别接下落刀」——标题说进、正文说别进。AMBUSH 家族
+                # 标题随点位状态自适应：⚡就绪才叫「可入场」，✋未就绪改「等点位」。
+                _title = SIG_TITLE.get(lvl, lvl + " 信号")
+                if lvl in ("AMBUSH", "AMBUSH_LITE") and "✋" in msg:
+                    _title = _title.replace("·可入场", "·等点位")
                 self.notifier.send(
-                    f"{SIG_EMOJI.get(lvl,'')} {SIG_TITLE.get(lvl, lvl + ' 信号')} · {sym}",
+                    f"{SIG_EMOJI.get(lvl,'')} {_title} · {sym}",
                     msg, level=lvl)
         self.write_dashboard()
         return ranked
