@@ -799,6 +799,7 @@ function render(d){
     rk2.innerHTML =
       '<div class="kpi">已结算 <b>'+rv.evaluated+'</b> 轮</div>'+
       '<div class="kpi">整体胜率 <b style="color:#22c55e">'+p1(ov2.rate)+'</b>（赢+大赢）</div>'+
+      '<div class="kpi">每笔期望 <b style="color:'+((ov2.ev>=0)?"#22c55e":"#ef4444")+'">'+((typeof ov2.ev==="number")?((ov2.ev>=0?"+":"")+(ov2.ev*100).toFixed(1)+"%"):"—")+'</b>（纪律口径）</div>'+
       '<div class="kpi">平均峰值 <b>'+((typeof ov2.avg_peak==="number")?("+"+(ov2.avg_peak*100).toFixed(0)+"%"):"—")+'</b></div>'+
       '<div class="kpi">启动率 <b>'+p1(ov2.launch_rate)+'</b></div>';
     var ms=[];
@@ -813,7 +814,7 @@ function render(d){
       (ds.length?("结局分布："+ds.join(" ｜ ")+"<br>"):"")+
       (cl.length?("条件胜率（重入评分依据）："+cl.join(" ｜ ")+"<br>"):"")+
       (ms.length>1?("按月胜率："+ms.slice(-8).join(" ｜ ")+"<br>"):"")+
-      "口径提醒：胜=峰值曾达+30%，不保证满仓吃到；滑点会吃掉一部分。Telegram 发 /review 可随时查看。";
+      "口径提醒：胜=峰值曾达+30%；期望=按纪律离场（赢+30%/弱+10%/破位−20%/超时按实际），未计滑点。Telegram 发 /review 可随时查看。";
   } else if(rk2){
     document.getElementById("revcard").style.display="none";
   }

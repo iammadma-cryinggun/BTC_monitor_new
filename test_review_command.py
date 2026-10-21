@@ -52,6 +52,11 @@ check("evaluated = settled only", rv["evaluated"] == 9)
 check("open_waiting tracked", rv["open_waiting"] == 1)
 # overall: wins = A1,A2,B2,D3 = 4 of 9
 check("overall rate 4/9", rv["overall"]["rate"] == round(4 / 9, 3))
+# discipline EV (2026-10-21): win/win_strong=+0.30, weak=+0.10,
+# pre_fail=-0.20, miss/timeout=actual peak.
+#   A1 win .30 | A2 strong .30 | A3 miss .05 | B1 fail -.20 | B2 win .30
+#   C timeout .00 | D1 miss .02 | D2 timeout .00 | D3 win .30  => sum 1.07
+check("overall EV (discipline lens) +0.119", rv["overall"]["ev"] == round(1.07 / 9, 3))
 # dist: win = A1,B2,D3 ; win_strong = A2 ; miss = A3,D1 ; timeout = C,D2 ; pre_fail = B1
 check("dist win=3 win_strong=1 miss=2 timeout=2 pre_fail=1",
       rv["dist"].get("win") == 3 and rv["dist"].get("win_strong") == 1
@@ -61,8 +66,17 @@ check("dist win=3 win_strong=1 miss=2 timeout=2 pre_fail=1",
 check("live cut 3/5", rv["by_src"]["live"]["rate"] == 0.6)
 check("backfill cut 1/4", rv["by_src"]["backfill"]["rate"] == 0.25)
 # monthly: 08 -> A1,A2,B1,D1 = 4, wins 2 ; 09 -> A3,B2,C,D2,D3 = 5, wins 2
+# (fixture months are tiny — lower the noise floor so they still show)
+insights.MIN_MONTH_N = 1
+rv = insights.win_rate_review(entries)
 check("monthly 08 = 2/4", rv["monthly"]["2026-08"]["rate"] == 0.5)
 check("monthly 09 = 2/5", rv["monthly"]["2026-09"]["rate"] == 0.4)
+# default floor 30: a 4/5-sample month is filtered as noise
+insights.MIN_MONTH_N = 30
+rv30 = insights.win_rate_review(entries)
+check("monthly noise filtered at default floor",
+      "2026-08" not in rv30["monthly"] and "2026-09" not in rv30["monthly"])
+insights.MIN_MONTH_N = 1
 # conditional:
 #  fresh:    A1, B1, C1, D1                     -> n=4, wins: A1 -> 1/4
 #  last_win: A2 (prev A1 win), A3 (prev A2 win) -> n=2, wins: A2 -> 1/2
@@ -91,7 +105,8 @@ check("route /review", "胜率复盘" in s and "结局分布" in s)
 check("report shows overall rate", "整体胜率" in s)
 check("report shows conditional rates", "条件胜率" in s)
 check("report shows monthly trend", "按月胜率" in s)
-check("report carries the honesty caveat", "不保证满仓吃到" in s)
+check("report carries the honesty caveat", "未计滑点" in s)
+check("report carries the EV line", "每笔期望" in s and "纪律口径" in s)
 check("report mentions live/backfill split", "实盘" in s and "回填" in s)
 
 s2 = ag.answer("帮我复盘一下")

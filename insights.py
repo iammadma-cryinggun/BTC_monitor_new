@@ -32,6 +32,7 @@ from datetime import datetime, timezone
 WIN = 0.30           # prior episode counts as a win at >= +30% peak
 GOLDEN_D = 3         # golden launch window (days from ambush call)
 AGING_D = 7          # beyond this, historical launches have mostly happened
+MIN_MONTH_N = 30     # monthly win-rate rows below this sample are noise
 MIN_LW_SAMPLE = 20   # launch-window note needs a real sample, not 3 entries
 
 
@@ -175,6 +176,22 @@ def win_rate_review(entries):
         dist[e["status"]] = dist.get(e["status"], 0) + 1
 
     # 2. overall + by source
+    # EV per settled round under the DISCIPLINE lens (conservative): wins are
+    # banked at the +30% target (never assume the +80% peak is caught), weak
+    # at +10%, pre_fail at the -20% stop, and miss/timeout at their actual
+    # (usually small) peak. This answers "成不成功" far better than win rate
+    # alone: 34% wins + capped losses can still be a positive-EV system.
+    def _disc_ret(e):
+        st = e.get("status")
+        if st in WINS:
+            return 0.30
+        if st == "weak":
+            return 0.10
+        if st == "pre_fail":
+            return -0.20
+        pg = e.get("peak_gain")
+        return pg if isinstance(pg, (int, float)) else 0.0
+
     def _cut(pool):
         if not pool:
             return None
@@ -183,8 +200,10 @@ def win_rate_review(entries):
              if isinstance(e.get("peak_gain"), (int, float))]
         launched = [e for e in pool if e.get("status") not in
                     ("pre_fail", "timeout")]
+        rets = [_disc_ret(e) for e in pool]
         return dict(n=len(pool), wins=w, rate=round(w / len(pool), 3),
                     avg_peak=round(sum(g) / len(g), 3) if g else None,
+                    ev=round(sum(rets) / len(rets), 3),
                     launch_rate=round(len(launched) / len(pool), 3) if pool else None)
 
     overall = _cut(fins)
@@ -203,6 +222,9 @@ def win_rate_review(entries):
             d["wins"] += 1
     for m, d in monthly.items():
         d["rate"] = round(d["wins"] / d["n"], 3) if d["n"] else None
+    # drop noise months: n<MIN_MONTH_N samples make "0% (n=1)" look like a
+    # trend (tests may lower the bar via insights.MIN_MONTH_N)
+    monthly = {m: d for m, d in monthly.items() if d["n"] >= MIN_MONTH_N}
 
     # 4. conditional: per coin, walk settled rounds in ts order; the outcome
     # of round i-1 conditions round i. This recomputes the exact numbers the

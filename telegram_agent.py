@@ -466,7 +466,9 @@ class TelegramAgent:
         ov = rv["overall"] or {}
         ap = f"{ov.get('avg_peak', 0):+.0%}" if ov.get("avg_peak") is not None else "—"
         lr = f"{ov.get('launch_rate', 0):.0%}" if ov.get("launch_rate") is not None else "—"
+        ev = f"{ov.get('ev', 0):+.1%}" if ov.get("ev") is not None else "—"
         lines.append(f"整体胜率 {ov.get('rate', 0):.0%}（赢+大赢 / 已结算）· "
+                     f"每笔期望 {ev}（纪律口径：赢+30%/破位−20%）· "
                      f"平均峰值 {ap} · 启动率 {lr}"
                      + (f" · 平均启动延迟 {rv['avg_delay']}天" if rv.get("avg_delay") is not None else ""))
         for src, label in (("live", "实盘"), ("backfill", "回填")):
@@ -506,12 +508,15 @@ class TelegramAgent:
                            f"（上轮胜 {lw:.0%} vs 首战 {fr:.0%}）")
         if isinstance(l2, float):
             verdict.append("连败降权规则有效" if l2 < 0.15 else "连败降权依据不足")
-        if ov.get("avg_peak") is not None:
+        if isinstance(ev := ov.get("ev"), (int, float)):
+            verdict.append(f"纪律口径期望 {ev:+.1%}/笔——正期望，程序成立" if ev > 0
+                           else f"⚠️ 纪律口径期望 {ev:+.1%}/笔——负期望，慎用")
+        elif ov.get("avg_peak") is not None:
             verdict.append("平均峰值为正，策略期望为正" if ov["avg_peak"] > 0
                            else "⚠️ 平均峰值为负，策略当前期望为负")
         if verdict:
             lines.append("结论：" + "；".join(verdict)
-                         + "。（口径提醒：胜=峰值曾达+30%，不保证满仓吃到；滑点会吃掉一部分）")
+                         + "。（口径提醒：胜=峰值曾达+30%；期望=按纪律离场计，未计滑点）")
         lines.append("每日战报在日报里；单币明细 /track 币名。")
         return "\n".join(lines)
 

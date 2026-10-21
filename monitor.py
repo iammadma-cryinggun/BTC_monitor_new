@@ -1194,15 +1194,20 @@ class Monitor:
         lite = [r for r in ranked if r["label"] == "COILING_LITE"]
         lines.append(f"其余：监控 {len(ranked)} 币 · 次级 {len(lite)} · 刚启动 {len(fresh)}"
                      f" · 明细看面板或 /ambush")
-        # one-line review (win-rate accountability; full report = /review)
+        # one-line review — SAME engine as the panel card and /review
+        # (overall rate + discipline EV), killing the old 口径 split between
+        # the digest's "达标率" (launched-only) and the panel's "胜率" (all)
         try:
-            import ambush_tracker
-            st = ambush_tracker.stats()
-            if st["total"]:
-                w3 = f"{st['win30_rate']:.0%}" if st["win30_rate"] is not None else "—"
-                src_note = f"（实盘 {st['live']} 笔）" if st["backfill"] else ""
-                lines.append(f"复盘：已结算 {st['evaluated']}{src_note} · +30% 达标率 {w3}"
-                             f" · 详情 /review")
+            import ambush_tracker, insights as _ins_rv
+            _ents = ambush_tracker.load()["entries"]
+            _rv = _ins_rv.win_rate_review(_ents)
+            if _rv["evaluated"]:
+                _ov = _rv["overall"] or {}
+                _rate = f"{_ov['rate']:.0%}" if _ov.get("rate") is not None else "—"
+                _ev = f"{_ov['ev']:+.0%}" if _ov.get("ev") is not None else "—"
+                _live = sum(1 for e in _ents if e.get("source") == "live")
+                lines.append(f"复盘：已结算 {_rv['evaluated']}（实盘 {_live} 笔）· "
+                             f"胜率 {_rate} · 期望 {_ev}/笔 · 详情 /review")
         except Exception as e:
             print(f"[ambush-digest] skipped: {e}")
         text = "\n".join(lines)

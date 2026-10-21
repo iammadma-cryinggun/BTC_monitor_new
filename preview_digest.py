@@ -56,10 +56,14 @@ lite = sum(1 for r in ranked if r.get("label") == "COILING_LITE")
 fresh = sum(1 for r in ranked if r.get("label") == "FRESH_LAUNCH")
 lines.append(f"其余：监控 {len(ranked)} 币 · 次级 {lite} · 刚启动 {fresh} · 明细看面板或 /ambush")
 st = amb.get("stats") or {}
-if st.get("evaluated"):
-    w3 = st.get("win30_rate")
-    w3s = f"{w3:.0%}" if isinstance(w3, (int, float)) else "—"
-    lines.append(f"复盘：已结算 {st['evaluated']}（实盘 {st.get('live', 0)} 笔）· +30% 达标率 {w3s} · 详情 /review")
+_rv = insights.win_rate_review(entries)
+_ov = _rv.get("overall") or {}
+if _rv.get("evaluated"):
+    _rate = f"{_ov.get('rate', 0):.0%}"
+    _ev = f"{_ov.get('ev', 0):+.1%}"
+    _live = sum(1 for e in entries if e.get("source") == "live")
+    lines.append(f"复盘：已结算 {_rv['evaluated']}（实盘 {_live} 笔）· "
+                 f"胜率 {_rate} · 期望 {_ev}/笔 · 详情 /review")
 
 print("=== 预览：新版每日妖币监控（确定性优先，全部真实数据） ===")
 print("\n".join(lines))
