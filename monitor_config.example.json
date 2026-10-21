@@ -2,7 +2,7 @@
   "market": "futures",
   "universe": "exchange",
   "symbols": [],
-  "scan_interval_minutes": 60,
+  "scan_interval_minutes": 120,
   "digest_hour": 8,
   "local_utc_offset_hours": 8,
   "request_sleep": 0.15,

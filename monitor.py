@@ -238,7 +238,7 @@ DEFAULT_CONFIG = {
     "market": "futures",
     "universe": "exchange",         # "exchange" (full ~400 perps, curated fallback) | "curated" | "list"
     "symbols": [],                  # used when universe=="list"
-    "scan_interval_minutes": 60,    # 信号扫描间隔（2026-10-21 用户指令：每小时更新一次）
+    "scan_interval_minutes": 120,   # 信号扫描间隔（2026-10-21 用户定版：继续每 2 小时）
     "digest_hour": 8,               # 本地时区的每日摘要时刻（小时）
     "local_utc_offset_hours": 8,    # 本地时区相对 UTC 的偏移（北京时间=8）
     "request_sleep": 0.15,          # 每币之间的 sleep，防封
