@@ -143,6 +143,39 @@ st, raw = get("/export_track")
 check("plain export stays pure (no regime_log key)",
       "regime_log" not in json.loads(raw.decode("utf-8")))
 
+# ---------- part 1d: merge=1 collision policy (2026-10-21 BIRB incident) ----------
+# pod tracker has a fresh backfill replay leaving the entry waiting; the local
+# snapshot knows the -20% stop already fired hours ago. merge must take the
+# FINALIZED snapshot entry over the waiting replay, or every deploy rolls back
+# the last hours' stop-outs (Telegram announced, panel forgot).
+MERGE_POD = {"entries": [dict(sym="BIRBUSDT", ts="2026-09-23T00:00:00+00:00", status="waiting",
+                              entry_price=0.0743, source="backfill", tier="main"),
+                         dict(sym="NEWUSDT", ts="2026-10-21T00:00:00+00:00", status="waiting",
+                              entry_price=1.0, source="backfill", tier="main")]}
+st, out = post("/restore_track?force=1", json.dumps(MERGE_POD))
+check("merge setup: force-write pod tracker (2 waiting)", st == 200 and out.get("ok"))
+MERGE_SNAP = {"entries": [dict(sym="BIRBUSDT", ts="2026-09-23T00:00:00+00:00", status="pre_fail",
+                               entry_price=0.0743, source="backfill", tier="main",
+                               final_ts="2026-10-21T15:10:00+00:00", peak_gain=-0.2204),
+                          dict(sym="LIVEUSDT", ts="2026-10-12T19:09:00+00:00", status="pre_fail",
+                               entry_price=1.0, source="live", tier="main",
+                               final_ts="2026-10-21T11:04:00+00:00", peak_gain=-0.3635)]}
+st, out = post("/restore_track?merge=1", json.dumps(MERGE_SNAP))
+check("merge: 200 ok", st == 200 and out.get("ok"))
+merged = json.load(open(os.path.join(tmp, "ambush_track.json"), encoding="utf-8"))
+ents = {(e.get("sym"), e.get("ts"), e.get("source")): e
+        for e in merged.get("entries") or []}
+birb = ents.get(("BIRBUSDT", "2026-09-23T00:00:00+00:00", "backfill"))
+check("merge: finalized snapshot beats waiting replay (BIRB stop preserved)",
+      birb is not None and birb.get("status") == "pre_fail"
+      and birb.get("final_ts") == "2026-10-21T15:10:00+00:00")
+check("merge: pod-only waiting entry kept",
+      ents.get(("NEWUSDT", "2026-10-21T00:00:00+00:00", "backfill")) is not None)
+check("merge: snapshot-only live entry folded in",
+      ents.get(("LIVEUSDT", "2026-10-12T19:09:00+00:00", "live")) is not None)
+check("merge: 3 entries total, no dupes",
+      len(merged.get("entries") or []) == 3)
+
 del os.environ["RESTORE_TOKEN"]
 st, out = post("/restore_track", BODY, token=None)
 check("env unset -> endpoint disabled 403", st == 403 and "RESTORE_TOKEN" in out.get("error", ""))

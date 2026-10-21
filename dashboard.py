@@ -223,10 +223,24 @@ def build_snapshot(ranked, signals, meta=None):
                        key=lambda e: e.get("ts") or "")
         _fin = sorted((e for e in _ent if e.get("status") not in ("waiting", "launched")),
                       key=lambda e: e.get("final_ts") or e.get("ts") or "", reverse=True)
+        # 2026-10-21 00:00Z 结算波：评估器同秒终审 171 条（回填重放的超时扫），
+        # 同时间戳平局按插入序占满 20 行，BIRB/MITO 的止损被挤出视野 →
+        # "Telegram 推了网页没有"再现。按币去重（每币只留最新一条），
+        # 20 行 = 20 个不同币，单币多轮明细留在 /review 与 tracker。
+        _seen_fin = set()
+        _fin_dedup = []
+        for e in _fin:
+            s = e.get("sym")
+            if s in _seen_fin:
+                continue
+            _seen_fin.add(s)
+            _fin_dedup.append(e)
+            if len(_fin_dedup) >= 20:
+                break
         ambush = {
             "stats": ambush_tracker.stats(store=_store),
             "entries": _open[-30:],          # oldest first = closest to timeout
-            "recent_finals": _fin[:20],   # 2026-10-21 止损潮：10 行装不下，MITO 收官被挤掉 → Telegram 推了网页没有
+            "recent_finals": _fin_dedup,     # 2026-10-21 止损潮：10 行装不下，MITO 收官被挤掉 → Telegram 推了网页没有
             "review": _ins2.win_rate_review(_ent),
         }
     except Exception:
@@ -935,13 +949,31 @@ class DashboardServer:
                             if not isinstance(existing, dict):
                                 existing = {"entries": []}
                             key = lambda e: (e.get("sym", ""), e.get("ts", ""), e.get("source", ""))
-                            have = {key(e) for e in (existing.get("entries") or [])}
-                            added = [e for e in entries if key(e) not in have]
+                            # collision policy: a snapshot entry that already has
+                            # an OUTCOME (final_ts set) beats the fresh pod entry
+                            # left waiting by the backfill replay — otherwise every
+                            # deploy rolls back the last hours' stop-outs / finals
+                            # (BIRB 2026-10-21: Telegram announced the -20% stop at
+                            # 15:10Z, recovery merge resurrected it as waiting).
+                            by_key = {}
+                            for e in (existing.get("entries") or []):
+                                by_key[key(e)] = e
+                            added = upgraded = 0
+                            for e in entries:
+                                k = key(e)
+                                cur_e = by_key.get(k)
+                                if cur_e is None:
+                                    by_key[k] = e
+                                    added += 1
+                                elif e.get("final_ts") and not cur_e.get("final_ts"):
+                                    by_key[k] = e
+                                    upgraded += 1
                             store = dict(existing)
-                            store["entries"] = (existing.get("entries") or []) + added
+                            store["entries"] = list(by_key.values())
                             entries = store["entries"]
-                            print(f"[restore] merge: {len(added)} new entries folded in, "
-                                  f"{len(have)} existing kept")
+                            print(f"[restore] merge: {added} new entries folded in, "
+                                  f"{upgraded} finalized entries upgraded over waiting replays, "
+                                  f"{len(entries)} total kept")
                         except Exception as e:
                             self._reply_json(500, {"ok": False,
                                                    "error": f"merge failed: {e}"})
