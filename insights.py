@@ -327,6 +327,9 @@ def value_board(ranked, entries=None, top=5):
                          note="·".join(note_parts),
                          potential=pot, score=r.get("score"),
                          price=r.get("price"),
+                         vol=bool(r.get("vol_tick")),
+                         volc=bool(vol_confirmed(r)),
+                         tm_ready=bool(((r.get("timing") or {}).get("ready"))),
                          tier=("lite" if r.get("label") == "COILING_LITE" else "main")))
     rows.sort(key=lambda x: -x["pts"])
     return rows[:top], len(cands)
@@ -353,10 +356,43 @@ def attach_evidence(ranked, entries=None):
     return ranked
 
 
-def board_lines(rows, n_total, lw=None):
-    """Format the value board as message lines (digest / /value share these)."""
+def board_lines(rows, n_total, lw=None, compact=False):
+    """Format the value board as message lines (digest / /value share these).
+
+    compact=True (daily digest, 2026-10-21 资金有限指令): Top 3 only, one
+    short line each — vol-tick coins first (closest to trigger), then pts.
+    Full reasoning stays on /value; the digest is a shortlist, not a report.
+    """
     if not rows:
         return []
+    if compact:
+        # 确定性优先（2026-10-21 用户指令：不设固定条数，只推确定性高的；
+        # 资金有限，没有高确定性就直说空仓等待）：
+        #   1) 埋伏★已确认（vol_confirmed）——可入场，最多 2 个；
+        #   2) 无确认 → 只报 1 个证据最硬的（上轮胜重入优先）「确认中」；
+        #   3) 连硬证据都没有 → 一句话空仓，不列任何币。
+        conf = sorted((r for r in rows if r.get("volc")),
+                      key=lambda r: -r["pts"])[:2]
+        if conf:
+            lines = ["🎯 今日高确定性入场（埋伏★量能已确认，按证据排序）："]
+            for i, r in enumerate(conf, 1):
+                pot = r.get("potential")
+                pot_s = (f"潜力{pot:.0f} · " if isinstance(pot, (int, float)) else "")
+                tm = "点位⚡现在可打" if r.get("tm_ready") else "✋挂单等回踩"
+                lines.append(f"  {i}. {r['sym']} {pot_s}{r.get('note') or '新面孔·无战绩'} · {tm}")
+            return lines
+        strong = [r for r in rows if "上轮胜" in (r.get("note") or "")]
+        if strong:
+            # vol-tick first (closest to trigger), then evidence pts
+            r = sorted(strong, key=lambda x: (not x.get("vol"), -x["pts"]))[0]
+            pot = r.get("potential")
+            pot_s = (f"潜力{pot:.0f} · " if isinstance(pot, (int, float)) else "")
+            vol_s = ("量能确认中——埋伏★确认后实时推送" if r.get("vol")
+                     else "量能信号未出现——埋伏★触发时会实时推送")
+            return ["🎯 今日无已确认入场。最接近的观察标的：",
+                    f"  {r['sym']} {pot_s}{r['note']} · {vol_s}"]
+        return ["🎯 今日无高确定性入场信号——空仓等待也是纪律"
+                "（埋伏★确认时 Telegram 会实时推送）。"]
     lines = [f"🎯 候选价值榜 · 当前横盘观察候选 {n_total} 个（均为观察态），只列前 {len(rows)} 个证据最硬的："]
     for i, r in enumerate(rows, 1):
         tag = "[次级] " if r["tier"] == "lite" else ""
@@ -374,10 +410,14 @@ def board_lines(rows, n_total, lw=None):
 # ----------------------------------------------------------------------------
 # aging split of open live calls: the culling conclusion
 # ----------------------------------------------------------------------------
-def aging_lines(entries=None, lw=None, now=None):
+def aging_lines(entries=None, lw=None, now=None, compact=False):
     """Split open LIVE ambush calls by age and attach the historical launch
     share as the culling criterion. Backfill waiting entries are replay
-    artifacts, not the user's calls — excluded."""
+    artifacts, not the user's calls — excluded.
+
+    compact=True (daily digest): counts + one verdict line, no coin lists —
+    the golden-window coins worth watching already surface in the Top-3
+    shortlist; listing 100+ names again is noise for a limited bankroll."""
     now = now or datetime.now(timezone.utc)
     live_w = [e for e in _entries_or(entries)
               if e.get("source") == "live" and e.get("status") == "waiting"]
@@ -398,6 +438,16 @@ def aging_lines(entries=None, lw=None, now=None):
     mid = sorted(e["sym"] for a, e in aged if a is not None and GOLDEN_D < a <= AGING_D)
     aging = sorted(((a, e) for a, e in aged if a is not None and a > AGING_D),
                    key=lambda x: -(x[0]))
+    if compact:
+        if not (fresh or mid or aging):
+            return []
+        parts = [f"⏳ 在途老化：黄金窗（≤{GOLDEN_D}天）{len(fresh)} 个最值得盯"
+                 f"（历史 {_pct((lw or {}).get('p3'))} 启动发生在这）"]
+        if mid:
+            parts.append(f"观察窗 {len(mid)} 个")
+        if aging:
+            parts.append(f"死水 {len(aging)} 个不用管（45 天自动撤）")
+        return [" · ".join(parts)]
     lines = [f"⏳ 在途埋伏老化结论（真实信号 {len(live_w)} 笔在等启动）："]
     if fresh:
         lines.append(f"  🟢 黄金窗（≤{GOLDEN_D}天）：{', '.join(fresh)} —— "

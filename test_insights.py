@@ -205,6 +205,25 @@ check("board_lines: header + numbered items + method line",
       and "排序口径" in text_bl and "52%" in text_bl)
 check("board_lines: lite tag rendered", "[次级] LITEUSDT" in text_bl)
 
+# ---------- 4a-bis-2. compact digest shortlist: certainty-first (2026-10-21
+# 用户指令：不设固定条数，只推确定性高的；资金有限，没有就直说空仓) ----------
+c_conf = dict(cand("CONFUSDT", potential=50, vol_tick=True),
+              vt_confirmed=True, timing={"ready": True, "vwap_dist": 0.001})
+rows_cf, _ = insights.value_board([c_conf] + ranked, hist_entries, top=10)
+bl_conf = insights.board_lines(rows_cf, 10, compact=True)
+check("compact: confirmed coin leads the shortlist",
+      bool(bl_conf) and "高确定性入场" in bl_conf[0]
+      and "CONFUSDT" in "\n".join(bl_conf) and "现在可打" in "\n".join(bl_conf))
+rows_nc, _ = insights.value_board(ranked, hist_entries, top=10)
+bl_strong = insights.board_lines(rows_nc, 10, compact=True)
+check("compact: no confirm -> single strongest watcher only",
+      bool(bl_strong) and "最接近的观察标的" in bl_strong[0]
+      and "ONEUSDT" in bl_strong[-1] and len(bl_strong) == 2)
+rows_new, _ = insights.value_board([cand("NEWUSDT", potential=60)], hist_entries, top=5)
+bl_flat = insights.board_lines(rows_new, 1, compact=True)
+check("compact: no hard evidence -> flat-cash line, no coin names",
+      bool(bl_flat) and "空仓等待" in bl_flat[0] and "NEWUSDT" not in "\n".join(bl_flat))
+
 # ---------- 4b. compact note + attach_evidence (dashboard/ambush ordering) ----------
 rows_full, _ = insights.value_board(ranked, hist_entries, top=10)
 row_one_full = next(r for r in rows_full if r["sym"] == "ONEUSDT")
@@ -275,9 +294,10 @@ mon.run_digest()
 digests = [s for s in mon.notifier.sent if "每日妖币监控" in s[0]]
 check("monitor: digest sent", bool(digests))
 dtxt = digests[-1][1] if digests else ""
-check("monitor: digest leads with the value board", "价值榜" in dtxt)
-check("monitor: digest contains aging verdicts", "老化结论" in dtxt)
-check("monitor: digest has the compact rest line", "其余观察" in dtxt)
+check("monitor: digest leads with the confirmed-entry shortlist",
+      "高确定性入场" in dtxt and "TESTUSDT" in dtxt)
+check("monitor: digest contains aging verdicts", "在途老化" in dtxt)
+check("monitor: digest has the compact rest line", "其余：" in dtxt)
 check("monitor: raw 18-row watchlist table REMOVED", "埋伏观察列表" not in dtxt)
 check("monitor: raw lite table REMOVED", "次级蓄力（大盘币新周期横盘，仓位小于主档" not in dtxt)
 check("monitor: raw fresh/launched/risk tables REMOVED",

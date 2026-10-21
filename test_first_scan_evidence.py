@@ -142,11 +142,14 @@ try:
               "1/2轮胜" in html_txt)
 
     # digest and dashboard must agree — the original symptom was divergence
-    digests = [m for t, m, l in mon.notifier.sent if "候选价值榜" in m]
+    # (2026-10-21 compact digest: no confirmed coin on the FIRST scan, so the
+    # shortlist degrades to the single strongest watcher — TESTUSDT, 1/2轮胜)
+    digests = [m for t, m, l in mon.notifier.sent if "每日妖币监控" in t]
     check("first scan: initial digest sent", len(digests) == 1)
     if digests:
-        check("CONSISTENCY: digest board and dashboard ev say the same thing",
-              ("第3轮重入" in digests[0] and "前 1/2 轮" in digests[0]
+        check("CONSISTENCY: digest shortlist and dashboard ev say the same thing",
+              ("最接近的观察标的" in digests[0] and "TESTUSDT" in digests[0]
+               and "1/2轮胜" in digests[0]
                and rec is not None and "1/2轮胜" in (rec.get("ev_note") or "")))
 
     # ---- SECOND scan: no re-backfill, AMBUSH fires with the base-rate note ----

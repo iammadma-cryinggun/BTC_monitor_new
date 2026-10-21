@@ -174,10 +174,14 @@ def outcome_event_signal(evd):
     return None, None
 
 
-def battle_report_lines(entries, days=7, now=None):
+def battle_report_lines(entries, days=7, now=None, compact=False):
     """战报 section for the daily digest: what happened to previous live
     ambush calls (launches / finals in the window, current best peaks,
-    cumulative live record). Returns [] when there is nothing to report."""
+    cumulative live record). Returns [] when there is nothing to report.
+
+    compact=True (2026-10-21 资金有限指令): positions that matter NOW only —
+    top open gainers (flag the ones past target), stop-loss alarms, finals
+    in one line. The 12-name launch list stays on the dashboard."""
     now = now or now_iso()
     try:
         t_now = datetime.fromisoformat(now)
@@ -194,6 +198,27 @@ def battle_report_lines(entries, days=7, now=None):
     launched = [e for e in live if e.get("launched_ts") and _inwin(e["launched_ts"])]
     finals = [e for e in live if e.get("final_ts") and _inwin(e["final_ts"])]
     open_l = [e for e in live if e["status"] == "launched"]
+    if compact:
+        if not (open_l or finals or launched):
+            return []
+        lines = []
+        if open_l:
+            best = sorted(open_l, key=lambda e: -((e.get("max_price") or e.get("entry_price") or 1)
+                                                  / (e.get("entry_price") or 1) - 1))
+            parts = []
+            for e in best[:3]:
+                ep = e.get("entry_price") or 0
+                g = ((e.get("max_price") or ep) / ep - 1) if ep else None
+                flag = "（超目标，考虑分批止盈）" if (g or 0) >= 0.30 else ""
+                parts.append(f"{e['sym']} 峰值{_fmt_pct(g)}{flag}")
+            lines.append("💼 在途仓 %d 个：%s%s" % (
+                len(open_l), " · ".join(parts), "…" if len(best) > 3 else ""))
+        if finals:
+            wins = [e for e in finals if e["status"] in ("win_strong", "win")]
+            losses = [e for e in finals if e["status"] in ("pre_fail", "timeout", "miss", "weak")]
+            alarm = f"🚨 止损警报：{'、'.join(e['sym'] for e in losses)}" if losses else "止损警报：无"
+            lines.append(f"  {alarm} ｜ 近{days}天收官：赢{len(wins)} 撤{len(losses)}")
+        return lines
     lines = [f"📈 战报（近 {days} 天，真实信号闭环）："]
     if launched:
         parts = []
@@ -1121,12 +1146,10 @@ class Monitor:
                       key=lambda r: -abs(r.get("day_move") or 0))
         date = self.utc_to_local(time.time()).strftime("%Y-%m-%d")
 
-        # note: notifier.send() already prepends the title ("📅 每日妖币监控 · {date}"),
-        # so do NOT repeat it here (would show twice on Telegram).
+        # ---- 极简 digest（2026-10-21 用户重申：资金有限，只要简单清晰的信息）
+        # 环境 + 资金纪律 + Top3 必盯 + 在途仓 + 老化一行 + 其余一行 + 复盘一行。
+        # 全量证据在 /value /ambush /review 和网页面板，日报只做 shortlist。
         lines = []
-        src = getattr(self, "universe_source", "curated")
-        lines.append(f"监控池 {src} · 池大小 {len(self.universe)} · 本轮有效 {len(ranked)} 币 | "
-                     f"观察候选 {len(coiling)} | 次级 {sum(1 for r in ranked if r['label']=='COILING_LITE')} | 刚启动 {len(fresh)}")
         rg = None
         try:
             import timing as _timing
@@ -1142,26 +1165,10 @@ class Monitor:
             _legs = ""
             if env.get("r4h") or env.get("r1d"):
                 _legs = f"（4h {env.get('r4h') or '—'} / 1d {env.get('r1d') or '—'}）"
-            lines.append(f"大盘环境（BTC 4h/1d）：{_cn}{_legs}"
-                         + ("——逆风期，新埋伏减半或推迟" if rg == "bearish" else ""))
-        # battle report FIRST: what happened to previous live calls — the
-        # closed loop must lead the digest, or it drowns under the fresh
-        # recommendation list it is supposed to hold accountable.
-        try:
-            import ambush_tracker
-            br = battle_report_lines(ambush_tracker.load()["entries"])
-            if br:
-                lines += br
-        except Exception as e:
-            print(f"[digest] battle report skipped: {e}")
-        # ---- conclusion-driven core (2026-10-20 feedback: "我需要类似的结论，
-        # 而不是大量的推荐——这样我才能找到有价值的标的埋伏") ----
-        # The raw 18-row watchlist / lite / fresh / launched / risk tables now
-        # live on the dashboard + /ambush + /value; the digest leads with what
-        # the EVIDENCE says: which candidates are worth ambushing (value board
-        # ranked by historical re-entry record, squeeze fuel, entry timing),
-        # which open calls are aging into statistical dead water, and one
-        # compact line for everything else.
+            lines.append(f"环境：BTC {_cn}{_legs}"
+                         + ("——逆风，新埋伏减半或推迟" if rg == "bearish" else "——可正常埋伏"))
+        lines.append("资金纪律：同时最多 2-3 仓 · 单仓 ≤1/3 资金 · 只在埋伏★量能确认后入场")
+        lines.append("")
         n_board, n_cands = 0, len(coiling)
         try:
             import ambush_tracker, insights
@@ -1170,50 +1177,32 @@ class Monitor:
             _rows, n_cands = insights.value_board(ranked, _store["entries"])
             n_board = len(_rows)
             if _rows:
+                lines += insights.board_lines(_rows, n_cands, _lw, compact=True)
                 lines.append("")
-                lines += insights.board_lines(_rows, n_cands, _lw)
-            _ag = insights.aging_lines(_store["entries"], lw=_lw)
+            br = battle_report_lines(_store["entries"], compact=True)
+            if br:
+                lines += br
+                lines.append("")
+            _ag = insights.aging_lines(_store["entries"], lw=_lw, compact=True)
             if _ag:
-                lines.append("")
                 lines += _ag
+                lines.append("")
         except Exception as e:
             print(f"[digest] insights skipped: {e}")
-        # everything else: counts + the actionable names only; details live
-        # on the web dashboard and via the Telegram /ambush command
+        # everything else: one count line; details live on the web dashboard
+        # and via the Telegram /ambush command
         lite = [r for r in ranked if r["label"] == "COILING_LITE"]
-        lines.append("")
-        rest = (f"其余观察（明细看网页看板或发 /ambush）：次级蓄力 {len(lite)} · "
-                f"刚启动 {len(fresh)} · 动能衰减 {len(launched)} · 警惕 {len(risk)}")
-        if fresh:
-            names = "、".join(r["sym"] for r in fresh[:3])
-            rest += f"；刚启动（做 S3→S4）：{names}" + ("…" if len(fresh) > 3 else "")
-        lines.append(rest)
-        lines.append("")
-        lines.append("信号会通过本渠道实时推送。手动交易，纪律第一。")
-        # ambush self-review: measure our own AMBUSH calls (the self-learning loop)
+        lines.append(f"其余：监控 {len(ranked)} 币 · 次级 {len(lite)} · 刚启动 {len(fresh)}"
+                     f" · 明细看面板或 /ambush")
+        # one-line review (win-rate accountability; full report = /review)
         try:
             import ambush_tracker
             st = ambush_tracker.stats()
             if st["total"]:
-                lines.append("")
-                src_note = f"（含回填 {st['backfill']} 笔，实盘 {st['live']} 笔）" if st["backfill"] else ""
-                lines.append(f"🎯 埋伏信号自检 · 跟踪 {st['total']} 笔{src_note}:")
-                if st["evaluated"]:
-                    lr = f"{st['launch_rate']:.0%}" if st["launch_rate"] is not None else "—"
-                    w3 = f"{st['win30_rate']:.0%}" if st["win30_rate"] is not None else "—"
-                    ap = f"{st['avg_peak']:+.0%}" if st["avg_peak"] is not None else "—"
-                    ad = f"{st['avg_delay']}天" if st["avg_delay"] is not None else "—"
-                    lines.append(f"  已结算 {st['evaluated']}：启动 {st['launched_n']}（{lr}）｜"
-                                 f"启动后 +30% 达标率 {w3} ｜ 平均峰值 {ap} ｜ 平均启动延迟 {ad}")
-                    b = st["buckets"]
-                    def _pct(x):
-                        return f"{x*100:.0f}%" if isinstance(x, (int, float)) else "—"
-                    seg = " ｜ ".join(
-                        f"{k}分: {v['n']}笔启动{_pct(v['launch_rate'])}"
-                        for k, v in b.items() if v["n"])
-                    if seg:
-                        lines.append(f"  分数段启动率 {seg}")
-                lines.append(f"  在途：等待启动 {st['open_waiting']} · 已启动跟踪 {st['open_launched']}")
+                w3 = f"{st['win30_rate']:.0%}" if st["win30_rate"] is not None else "—"
+                src_note = f"（实盘 {st['live']} 笔）" if st["backfill"] else ""
+                lines.append(f"复盘：已结算 {st['evaluated']}{src_note} · +30% 达标率 {w3}"
+                             f" · 详情 /review")
         except Exception as e:
             print(f"[ambush-digest] skipped: {e}")
         text = "\n".join(lines)
