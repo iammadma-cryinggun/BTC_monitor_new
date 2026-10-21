@@ -484,6 +484,9 @@ def classify(sym, rec, prev, btc_regime=None, market="futures"):
         # shorts paying up while positions pile in -> squeeze fuel if it launches
         fd = rec.get("funding"); oc = rec.get("oi_chg_24h")
         dv = []
+        tbr = rec.get("tbuy_ratio")
+        if isinstance(tbr, (int, float)):
+            dv.append(f"主动买盘 {tbr*100:.0f}%")
         if isinstance(fd, (int, float)):
             dv.append(f"资金费率 {fd*100:+.3f}%")
         if isinstance(oc, (int, float)):
@@ -513,6 +516,9 @@ def classify(sym, rec, prev, btc_regime=None, market="futures"):
         pv_s = f"{pv*100:+.0f}%" if pv is not None else "n/a"
         fd = rec.get("funding"); oc = rec.get("oi_chg_24h")
         dv = []
+        tbr = rec.get("tbuy_ratio")
+        if isinstance(tbr, (int, float)):
+            dv.append(f"主动买盘 {tbr*100:.0f}%")
         if isinstance(fd, (int, float)):
             dv.append(f"资金费率 {fd*100:+.3f}%")
         if isinstance(oc, (int, float)):

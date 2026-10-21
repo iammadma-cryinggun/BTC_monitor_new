@@ -542,6 +542,16 @@ def score_coin(sym, market="spot", force_fetch=False):
         except Exception:
             pass
 
+    # Delta direction gate (2026-10-21, learned from KBeast.eth's order-flow
+    # system): volume that "wakes up" must be NET BUYING. A crash bar has
+    # huge volume too — MITO/PTB fell 20%+ and their crash volume passed the
+    # volume-rise check above, firing ambush signals on falling knives.
+    # tbuy_ratio >= 0.50 over the SAME 3-bar window = buyers, not sellers,
+    # dominate the fresh volume. Old cached CSVs lack the tbuy column ->
+    # ratio None -> gate skipped (backward compat with replay fixtures).
+    if vol_tick and tbuy_ratio is not None and tbuy_ratio < 0.50:
+        vol_tick = False
+
     # 20-day (120 4h bars) swing ratio — gates out stablecoins / tokenized stocks / dead coins
     win = close[-120:]
     swing = (float(np.max(win)) / float(np.min(win))) if len(win) and np.min(win) > 0 else 1.0
