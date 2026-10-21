@@ -290,15 +290,15 @@ class TelegramAgent:
         when the coin is not actionable right now."""
         lab = r.get("label")
         vt = bool(r.get("vol_tick"))
-        st = r.get("vt_streak") if isinstance(r.get("vt_streak"), (int, float)) else 0
+        conf = insights.vol_confirmed(r)
         t = r.get("timing") or {}
         has_t = t.get("ready") in (True, False)
         if lab == "COILING" and vt:
-            if st >= 2:
+            if conf:
                 return ("go", "✅ 可入场") if (has_t and t.get("ready")) else ("wait", "⏳ 挂单等点位（等回踩企稳）")
-            return ("chk", "👀 量能首现·等下轮确认")
+            return ("chk", "👀 量能首现·等确认窗")
         if lab == "COILING_LITE" and vt:
-            if st >= 2:
+            if conf:
                 return ("go2", "✅ 次级可入场·半仓") if (has_t and t.get("ready")) else ("wait", "⏳ 次级·挂单等点位")
             return ("chk", "👀 次级·量能首现")
         return (None, None)
@@ -354,8 +354,7 @@ class TelegramAgent:
         if rk:
             lines.append(f"🔥 观察候选列表（{len(rk)} 个，按证据分排序，前 12；均为观察态）：")
             for r in rk[:12]:
-                _st = r.get("vt_streak") if isinstance(r.get("vt_streak"), (int, float)) else 0
-                star = "★" if (r.get("vol_tick") and _st >= 2) else ("＋" if r.get("vol_tick") else " ")
+                star = "★" if (r.get("vol_tick") and insights.vol_confirmed(r)) else ("＋" if r.get("vol_tick") else " ")
                 tm = r.get("timing") or {}
                 tmk = "⚡" if tm.get("ready") else ("✋" if tm else " ")
                 fd, oc = r.get("funding"), r.get("oi_chg_24h")
@@ -380,8 +379,7 @@ class TelegramAgent:
             lines.append("")
             lines.append(f"🔵 次级蓄力（{len(lite)} 个，大盘币新周期横盘，按证据分前 6，仓位小于主档）：")
             for r in lite[:6]:
-                _st = r.get("vt_streak") if isinstance(r.get("vt_streak"), (int, float)) else 0
-                star = "★" if (r.get("vol_tick") and _st >= 2) else ("＋" if r.get("vol_tick") else " ")
+                star = "★" if (r.get("vol_tick") and insights.vol_confirmed(r)) else ("＋" if r.get("vol_tick") else " ")
                 ev_s = ""
                 if isinstance(r.get("ev_pts"), (int, float)):
                     ev_s = f" 证据{r['ev_pts']:.0f}({r.get('ev_note', '')})"

@@ -44,6 +44,7 @@ for name in ("ambush_track.json", "signals_log.json", "monitor_state.json",
         _MOVED.append((bak, cur))
 
 import monitor
+monitor.CONFIRM_MIN_H = 0   # offline test: scans run back-to-back, kill the wall-clock gate
 import ambush_tracker
 
 _fake_timing = types.ModuleType("timing")

@@ -127,25 +127,27 @@ _ACTION_COLOR = {"go": "#22c55e", "go2": "#38bdf8", "wait": "#fbbf24",
 def _action_cell(r):
     """Direct-advice column (2026-10-21 user review: "我不需要什么观察，我只
     需要你直接的建议"). Collapses the two orthogonal dimensions — volume
-    signal (vol_tick streak) x 15m timing gate — into ONE recommended action:
+    signal (vt_confirmed) x 15m timing gate — into ONE recommended action:
 
-      go    可入场        signal confirmed (streak>=2) AND 15m timing ready
+      go    可入场        signal confirmed AND 15m timing ready
       wait  挂单等点位    signal confirmed but timing not ready / unmeasured
-      chk   量能首现      vol_tick on the FIRST scan only — streak 1/2, the
-                          AMBUSH signal has NOT fired yet (needs 2 in a row)
+      chk   量能首现      vol_tick not yet confirmed (streak short or the
+                          CONFIRM_MIN_H persistence window not elapsed) —
+                          the AMBUSH signal has NOT fired yet
       no    —             not an ambush entry (launched/pumped/... etc)
     """
+    import insights as _ins
     lab = r.get("label")
     vt = bool(r.get("vol_tick"))
-    st = r.get("vt_streak") if isinstance(r.get("vt_streak"), (int, float)) else 0
+    conf = _ins.vol_confirmed(r)
     t = r.get("timing") or {}
     has_t = t.get("ready") in (True, False)
     if lab == "COILING" and vt:
-        if st >= 2:
+        if conf:
             return ("go", "✅ 可入场") if (has_t and t.get("ready")) else ("wait", "⏳ 挂单等点位")
-        return ("chk", "量能首现·等下轮确认")
+        return ("chk", "量能首现·等确认")
     if lab == "COILING_LITE" and vt:
-        if st >= 2:
+        if conf:
             return ("go2", "✅ 次级可入场·半仓") if (has_t and t.get("ready")) else ("wait", "⏳ 次级·挂单等点位")
         return ("chk", "次级·量能首现")
     if lab == "FRESH_LAUNCH":
@@ -156,19 +158,20 @@ def _action_cell(r):
 
 
 def _disp_label(r):
+    import insights as _ins
     lab = r.get("label")
     tm = _timing_mark(r)
-    st = r.get("vt_streak") if isinstance(r.get("vt_streak"), (int, float)) else 0
+    conf = _ins.vol_confirmed(r)
     if lab == "COILING":
         if r.get("vol_tick"):
-            # 埋伏★ is the TRIGGERED signal (2-scan confirmed volume);
+            # 埋伏★ is the TRIGGERED signal (confirmed volume);
             # a first-scan tick is deliberately NOT 埋伏 — the wording
             # unification (e5a18a7) reserves 埋伏 for fired signals.
-            return ("🔥埋伏★" if st >= 2 else "量能首现") + tm
+            return ("🔥埋伏★" if conf else "量能首现") + tm
         return "观察" + tm
     if lab == "COILING_LITE":
         if r.get("vol_tick"):
-            return ("🔵次级★" if st >= 2 else "次级首现") + tm
+            return ("🔵次级★" if conf else "次级首现") + tm
         return "次级蓄力" + tm
     base = {"FRESH_LAUNCH": "⚡刚启动", "LAUNCHED": "已启动", "PUMPED": "已拉完",
             "CRASHING": "崩盘中", "LOW_VOL": "低波动", "STABLE": "稳定币",
@@ -185,11 +188,10 @@ def build_snapshot(ranked, signals, meta=None):
     meta = meta or {}
     ranked = ranked or []
     n_coins = len(ranked)
-    _stk = lambda r: (r.get("vt_streak") if isinstance(r.get("vt_streak"), (int, float)) else 0)
-    n_amb = sum(1 for r in ranked if r.get("label") == "COILING"
-                and r.get("vol_tick") and _stk(r) >= 2)
-    n_first = sum(1 for r in ranked if r.get("label") == "COILING"
-                  and r.get("vol_tick") and _stk(r) < 2)
+    import insights as _ins
+    _vt_on = lambda r: (r.get("label") == "COILING" and r.get("vol_tick"))
+    n_amb = sum(1 for r in ranked if _vt_on(r) and _ins.vol_confirmed(r))
+    n_first = sum(1 for r in ranked if _vt_on(r) and not _ins.vol_confirmed(r))
     n_lite = sum(1 for r in ranked if r.get("label") == "COILING_LITE")
     n_fresh = sum(1 for r in ranked if r.get("label") == "FRESH_LAUNCH")
     try:
@@ -208,11 +210,25 @@ def build_snapshot(ranked, signals, meta=None):
     # integrity flag: rendered table set is far smaller than what was actually
     # scored -> the on-disk file is stale/incomplete. Surface it.
     ranked_lag = bool(retest_ok) and n_coins < max(1, retest_ok * 0.5)
-    # ambush self-review loop (outcome tracking of our own AMBUSH calls)
+    # ambush position + review loop (2026-10-21 极简版：入场/止损/离场/复盘).
+    # entries = OPEN positions first (waiting/launched — each row carries the
+    # stop line -20% and target +30%), then a few recent finals. review = the
+    # win-rate accountability numbers (same engine as Telegram /review).
     ambush = None
     try:
-        import ambush_tracker
-        ambush = {"stats": ambush_tracker.stats(), "entries": ambush_tracker.recent(30)}
+        import ambush_tracker, insights as _ins2
+        _store = ambush_tracker.load()
+        _ent = _store.get("entries", [])
+        _open = sorted((e for e in _ent if e.get("status") in ("waiting", "launched")),
+                       key=lambda e: e.get("ts") or "")
+        _fin = sorted((e for e in _ent if e.get("status") not in ("waiting", "launched")),
+                      key=lambda e: e.get("final_ts") or e.get("ts") or "", reverse=True)
+        ambush = {
+            "stats": ambush_tracker.stats(store=_store),
+            "entries": _open[-30:],          # oldest first = closest to timeout
+            "recent_finals": _fin[:10],
+            "review": _ins2.win_rate_review(_ent),
+        }
     except Exception:
         pass
     return {
@@ -297,11 +313,10 @@ def build_dashboard_html(ranked, signals, meta=None):
     interval = meta.get("scan_interval_minutes", 120)
     ranked = ranked or []
     n_coins = len(ranked)
-    _stk = lambda r: (r.get("vt_streak") if isinstance(r.get("vt_streak"), (int, float)) else 0)
-    n_amb = sum(1 for r in ranked if r.get("label") == "COILING"
-                and r.get("vol_tick") and _stk(r) >= 2)
-    n_first = sum(1 for r in ranked if r.get("label") == "COILING"
-                  and r.get("vol_tick") and _stk(r) < 2)
+    import insights as _ins
+    _vt_on = lambda r: (r.get("label") == "COILING" and r.get("vol_tick"))
+    n_amb = sum(1 for r in ranked if _vt_on(r) and _ins.vol_confirmed(r))
+    n_first = sum(1 for r in ranked if _vt_on(r) and not _ins.vol_confirmed(r))
     n_lite = sum(1 for r in ranked if r.get("label") == "COILING_LITE")
     n_fresh = sum(1 for r in ranked if r.get("label") == "FRESH_LAUNCH")
     try:
@@ -331,14 +346,8 @@ def build_dashboard_html(ranked, signals, meta=None):
                               -(r["ev_pts"] if isinstance(r.get("ev_pts"), (int, float))
                                 else (r.get("potential") if r.get("potential") is not None
                                       else r.get("score", 0)))))
-    others = [r for r in ranked if r.get("label") not in ("COILING", "COILING_LITE", "FRESH_LAUNCH")]
-    others.sort(key=lambda r: -r.get("score", 0))
-    capped = len(others) > 150
-    others_disp = others[:150] if capped else others
-    ordered = watch + others_disp
 
     watch_rows = "".join(_row(r) for r in watch) or '<tr><td colspan="14" class="rs">（暂无可入场候选）</td></tr>'
-    full_rows = "".join(_row(r) for r in ordered) or '<tr><td colspan="14" class="rs">（无数据）</td></tr>'
 
     sig_rows = ""
     for s in signals[-30:][::-1]:
@@ -399,36 +408,23 @@ th{{color:var(--mut);font-weight:600;position:sticky;top:0;background:var(--card
 
 <div class="card">
   <div class="kpis">
-    <div class="kpi">监控币数 <b>{u_size}</b></div>
-    <div class="kpi">本轮回测有效 <b style="color:{'#f87171' if (u_size and n_coins < u_size*0.5) else '#fff'}">{n_coins}</b></div>
-    <div class="kpi">🔥埋伏★ <b style="color:#f59e0b">{n_amb}</b></div>
+    <div class="kpi">🔥埋伏★确认 <b style="color:#f59e0b">{n_amb}</b></div>
     <div class="kpi">🌱量能首现 <b style="color:#a3e635">{n_first}</b></div>
-    <div class="kpi">🔵次级蓄力 <b style="color:#38bdf8">{n_lite}</b></div>
-    <div class="kpi">⚡刚启动 <b style="color:#22c55e">{n_fresh}</b></div>
-    <div class="kpi">近24h信号 <b>{n_sig24}</b></div>
+    <div class="kpi">监控池 <b>{u_size}</b> · 本轮有效 <b style="color:{'#f87171' if (u_size and n_coins < u_size*0.5) else '#fff'}">{n_coins}</b></div>
   </div>
   <div class="note">上次扫描：{last_scan} ｜ 距下次扫描：<span id="cd" class="cnt">—</span> ｜ 手动交易，纪律第一，本看板只呈现信号、不代下单。</div>
   {diag}
-  {health}
 </div>
 
 <div class="card">
-  <div class="h2">🔥 可入场列表（埋伏★=量能已抬头并连续 2 扫确认；量能首现=仅首扫量能抬头，等下轮确认，尚未触发；动作列=直接建议：可入场=信号确认+15m点位共振，挂单等点位=区间内挂单等回踩企稳；⚡=点位就绪，✋=未就绪）</div>
+  <div class="h2">🔥 可入场列表（埋伏★=量能已确认；量能首现=量能抬头但未过确认窗，尚未触发；动作列=直接建议：可入场=信号确认+15m点位共振，挂单等点位=区间内挂单等回踩企稳；⚡=点位就绪，✋=未就绪）</div>
   <table><tr><th>币种</th><th>标签</th><th>动作</th><th>阶段</th><th>分</th><th>潜力</th><th>证据分</th><th>现价</th><th>vsMA99</th><th>1hMA99</th><th>OI·费率</th><th>~1日</th><th>4h走势</th><th>依据</th></tr>
   {watch_rows}
   </table>
 </div>
 
 <div class="card">
-  <div class="h2">📊 全量监控（按信号分排序，显示前 {len(ordered)} / 共 {n_coins}）</div>
-  <table><tr><th>币种</th><th>标签</th><th>动作</th><th>阶段</th><th>分</th><th>潜力</th><th>证据分</th><th>现价</th><th>vsMA99</th><th>1hMA99</th><th>OI·费率</th><th>~1日</th><th>4h走势</th><th>依据</th></tr>
-  {full_rows}
-  </table>
-  {('<div class="note">已按信号分截断显示前 150 行；全部 {0} 个币均已扫描，完整数据见 <code>data/monitor_state.json</code>。</div>'.format(len(others))) if capped else ''}
-</div>
-
-<div class="card">
-  <div class="h2">🔔 信号流（最近 30 条）</div>
+  <div class="h2">🔔 信号流（最近 30 条 · 入场/止损/离场/复盘四类）</div>
   <table><tr><th>时间(UTC)</th><th></th><th>币种</th><th>摘要</th></tr>
   {sig_rows}
   </table>
@@ -558,26 +554,28 @@ th{color:var(--mut);font-weight:600;position:sticky;top:0;background:var(--card)
   <div id="health"></div>
 </div>
 <div class="card">
-  <div class="h2">🔥 可入场列表（埋伏★=量能已抬头并连续 2 扫确认；量能首现=仅首扫量能抬头，等下轮确认，尚未触发；动作列=直接建议：可入场=信号确认+15m点位共振，挂单等点位=区间内挂单等回踩企稳；⚡=点位就绪，✋=未就绪）</div>
+  <div class="h2">🔥 可入场列表（埋伏★=量能已确认；量能首现=量能抬头但未过确认窗，尚未触发；动作列=直接建议：可入场=信号确认+15m点位共振，挂单等点位=区间内挂单等回踩企稳；⚡=点位就绪，✋=未就绪）</div>
   <div style="margin-bottom:10px"><button id="obsbtn" style="background:#161a22;border:1px solid #1f2937;color:#9ca3af;border-radius:8px;padding:6px 12px;font-size:12px;cursor:pointer">显示未触发的观察池</button> <span id="obscount" style="color:#9ca3af;font-size:11px"></span></div>
   <table><tr><th>币种</th><th>标签</th><th>动作</th><th>阶段</th><th>分</th><th>潜力</th><th>证据分</th><th>现价</th><th>vsMA99</th><th>1hMA99</th><th>OI·费率</th><th>~1日</th><th>4h走势</th><th>依据</th></tr>
   <tbody id="watch"></tbody></table>
 </div>
-<div class="card">
-  <div class="h2" id="fullh2">📊 全量监控</div>
-  <table><tr><th>币种</th><th>标签</th><th>动作</th><th>阶段</th><th>分</th><th>潜力</th><th>证据分</th><th>现价</th><th>vsMA99</th><th>1hMA99</th><th>OI·费率</th><th>~1日</th><th>4h走势</th><th>依据</th></tr>
-  <tbody id="full"></tbody></table>
-  <div id="fullnote" class="note"></div>
-</div>
 <div class="card" id="ambcard">
-  <div class="h2">🎯 埋伏信号追踪（自我复盘：自己的埋伏判断，自己算胜率）</div>
+  <div class="h2">🎯 持仓与离场追踪（每仓独立：入场价 → 止损 -20% / 目标 +30%；45 天窗）</div>
   <div class="kpis" id="ambkpis"></div>
   <div class="note" id="ambnote"></div>
-  <table><tr><th>信号时间(UTC)</th><th>币种</th><th>来源</th><th>入场价</th><th>状态</th><th>峰值涨幅</th><th>现价/最新</th><th>备注</th></tr>
+  <table><tr><th>币种</th><th>入场日(UTC)</th><th>来源</th><th>入场价</th><th>现价</th><th>浮动</th><th>止损价(-20%)</th><th>目标价(+30%)</th><th>已等</th><th>状态</th></tr>
   <tbody id="ambrows"></tbody></table>
+  <div class="h2" style="margin-top:14px">🏁 最近收官（离场结果）</div>
+  <table><tr><th>币种</th><th>入场日(UTC)</th><th>入场价</th><th>结局</th><th>峰值</th></tr>
+  <tbody id="finrows"></tbody></table>
+</div>
+<div class="card" id="revcard">
+  <div class="h2">📊 复盘 · 胜率验证（这套程序成不成功，数字说话）</div>
+  <div class="kpis" id="revkpis"></div>
+  <div class="note" id="revnote"></div>
 </div>
 <div class="card">
-  <div class="h2">🔔 信号流（最近 30 条）</div>
+  <div class="h2">🔔 信号流（最近 30 条 · 入场/止损/离场/复盘）</div>
   <table><tr><th>时间(UTC)</th><th></th><th>币种</th><th>摘要</th></tr>
   <tbody id="sigs"></tbody></table>
 </div>
@@ -602,11 +600,15 @@ function tmark(r){
   if(!t.ready&&t.ready!==false) return "";
   return t.ready?"⚡":"✋";
 }
+function vconf(r){
+  if(r.vt_confirmed===true) return true;
+  if(r.vt_confirmed===false) return false;
+  return (typeof r.vt_streak==="number")?r.vt_streak>=2:false;
+}
 function dispLabel(r){
   var tm=tmark(r);
-  var st=(typeof r.vt_streak==="number")?r.vt_streak:0;
-  if(r.label==="COILING") return (r.vol_tick?(st>=2?"🔥埋伏★":"量能首现"):"观察")+tm;
-  if(r.label==="COILING_LITE") return (r.vol_tick?(st>=2?"🔵次级★":"次级首现"):"次级蓄力")+tm;
+  if(r.label==="COILING") return (r.vol_tick?(vconf(r)?"🔥埋伏★":"量能首现"):"观察")+tm;
+  if(r.label==="COILING_LITE") return (r.vol_tick?(vconf(r)?"🔵次级★":"次级首现"):"次级蓄力")+tm;
   var m={FRESH_LAUNCH:"⚡刚启动",LAUNCHED:"已启动",PUMPED:"已拉完",CRASHING:"崩盘中",LOW_VOL:"低波动",STABLE:"稳定币",STOCK:"代币股",UNKNOWN:"未知"};
   var b=m[r.label]||r.label;
   return r.label==="FRESH_LAUNCH"?b+tm:b;
@@ -634,13 +636,12 @@ function evCell(r){
 }
 function actionInfo(r){
   var t=r.timing||{}, hasT=(t.ready===true||t.ready===false);
-  var st=(typeof r.vt_streak==="number")?r.vt_streak:0;
   if(r.label==="COILING"&&r.vol_tick){
-    if(st>=2) return hasT&&t.ready?["go","#22c55e","✅ 可入场"]:["wait","#fbbf24","⏳ 挂单等点位"];
-    return ["chk","#9ca3af","量能首现·等下轮确认"];
+    if(vconf(r)) return hasT&&t.ready?["go","#22c55e","✅ 可入场"]:["wait","#fbbf24","⏳ 挂单等点位"];
+    return ["chk","#9ca3af","量能首现·等确认"];
   }
   if(r.label==="COILING_LITE"&&r.vol_tick){
-    if(st>=2) return hasT&&t.ready?["go2","#38bdf8","✅ 次级可入场·半仓"]:["wait","#fbbf24","⏳ 次级·挂单等点位"];
+    if(vconf(r)) return hasT&&t.ready?["go2","#38bdf8","✅ 次级可入场·半仓"]:["wait","#fbbf24","⏳ 次级·挂单等点位"];
     return ["chk","#9ca3af","次级·量能首现"];
   }
   if(r.label==="FRESH_LAUNCH") return ["no","#6b7280","已启动·等S3回踩"];
@@ -687,13 +688,9 @@ function render(d){
   // true count and stays consistent with the Telegram digest.
   var broken = usz && rok < Math.max(1, usz*0.5);
   document.getElementById("kpis").innerHTML =
-    '<div class="kpi">监控币数 <b>'+usz+'</b></div>'+
-    '<div class="kpi">本轮回测有效 <b style="color:'+(broken?"#f87171":"#fff")+'">'+rok+'</b></div>'+
-    '<div class="kpi">🔥埋伏★ <b style="color:#f59e0b">'+(k.ambush||0)+'</b></div>'+
+    '<div class="kpi">🔥埋伏★确认 <b style="color:#f59e0b">'+(k.ambush||0)+'</b></div>'+
     '<div class="kpi">🌱量能首现 <b style="color:#a3e635">'+(k.first_tick||0)+'</b></div>'+
-    '<div class="kpi">🔵次级蓄力 <b style="color:#38bdf8">'+(k.ambush_lite||0)+'</b></div>'+
-    '<div class="kpi">⚡刚启动 <b style="color:#22c55e">'+(k.fresh||0)+'</b></div>'+
-    '<div class="kpi">近24h信号 <b>'+(k.sig24||0)+'</b></div>';
+    '<div class="kpi">监控池 <b>'+usz+'</b> · 本轮有效 <b style="color:'+(broken?"#f87171":"#fff")+'">'+rok+'</b></div>';
   document.getElementById("scanline").textContent = "上次扫描："+meta.last_scan+" ｜ 距下次扫描："+
     '<span id="cd" class="cnt">—</span>'+" ｜ 手动交易，纪律第一，本看板只呈现信号、不代下单。";
   NEXT = meta.next_scan_epoch||0; tick();
@@ -736,13 +733,7 @@ function render(d){
   if(btn) btn.textContent=SHOWOBS?("隐藏观察池（只看可行动 "+actionable.length+" 个）"):("显示未触发的观察池（"+hidden+" 个）");
   var oc=document.getElementById("obscount");
   if(oc) oc.textContent=SHOWOBS?("当前显示全部 "+watchAll.length+" 个（可行动 "+actionable.length+"）"):"";
-  var others=ranked.filter(function(r){return r.label!=="COILING"&&r.label!=="COILING_LITE"&&r.label!=="FRESH_LAUNCH";});
-  others.sort(function(a,b){return (b.score||0)-(a.score||0);});
-  var capped=others.length>150, disp=watch.concat(others.slice(0,150));
   document.getElementById("watch").innerHTML = watch.map(row).join("") || '<tr><td colspan="14" class="rs">（暂无可入场候选——当前无埋伏★触发）</td></tr>';
-  document.getElementById("full").innerHTML = disp.map(row).join("") || '<tr><td colspan="14" class="rs">（无数据）</td></tr>';
-  document.getElementById("fullh2").textContent = "📊 全量监控（按信号分排序，显示前 "+disp.length+" / 共 "+rok+"）";
-  document.getElementById("fullnote").innerHTML = capped ? ("已按信号分截断显示前 150 行；全部 "+others.length+" 个币均已扫描，完整数据见 data/monitor_state.json。") : "";
   // signals
   var sg="";
   sigs.slice(-30).reverse().forEach(function(s){
@@ -752,39 +743,79 @@ function render(d){
     sg+='<tr><td class="ts">'+ts+'</td><td class="em">'+em+'</td><td class="ssym">'+(s.sym||"")+'</td><td class="smsg">'+msg+'</td></tr>';
   });
   document.getElementById("sigs").innerHTML = sg || '<tr><td colspan="4" class="smsg">（暂无信号）</td></tr>';
-  // ambush self-review card
+  // ambush position & exit tracking card + win-rate review card
+  // (2026-10-21 极简指令: 入场/止损/离场/复盘 only)
   var am=d.ambush, amk=document.getElementById("ambkpis"), amr=document.getElementById("ambrows"), amn=document.getElementById("ambnote");
+  var fr=document.getElementById("finrows");
   if(amk&&amr&&am&&am.stats){
     var s=am.stats;
     function p1(x){ return (typeof x==="number")?(x*100).toFixed(0)+"%":"—"; }
+    var ovR=(am.review&&am.review.overall)||{};
     amk.innerHTML =
-      '<div class="kpi">跟踪 <b>'+s.total+'</b></div>'+
+      '<div class="kpi">在途仓 <b style="color:#f59e0b">'+(s.open_waiting+s.open_launched)+'</b>'+(s.open_waiting)+'等/'+(s.open_launched)+'启</div>'+
       '<div class="kpi">已结算 <b>'+s.evaluated+'</b></div>'+
-      '<div class="kpi">启动率 <b style="color:#22c55e">'+p1(s.launch_rate)+'</b></div>'+
-      '<div class="kpi">+30%达标 <b style="color:#f59e0b">'+p1(s.win30_rate)+'</b></div>'+
-      '<div class="kpi">平均峰值 <b>'+((typeof s.avg_peak==="number")?("+"+(s.avg_peak*100).toFixed(0)+"%"):"—")+'</b></div>'+
-      '<div class="kpi">在途 '+(s.open_waiting+s.open_launched)+' <b>'+(s.open_waiting)+'等/'+(s.open_launched)+'启</b></div>';
+      '<div class="kpi">整体胜率 <b style="color:#22c55e">'+p1(ovR.rate)+'</b></div>'+
+      '<div class="kpi">平均峰值 <b>'+((typeof ovR.avg_peak==="number")?("+"+(ovR.avg_peak*100).toFixed(0)+"%"):"—")+'</b></div>'+
+      '<div class="kpi">平均启动延迟 <b>'+((am.review&&am.review.avg_delay!=null)?(am.review.avg_delay+"天"):"—")+'</b></div>';
     var SC={waiting:"#f59e0b",launched:"#0ea5e9",win_strong:"#22c55e",win:"#22c55e",weak:"#9ca3af",miss:"#6b7280",pre_fail:"#ef4444",timeout:"#4b5563"};
-    var CN={waiting:"等待启动",launched:"已启动·跟踪中",win_strong:"大赢(+80%)",win:"赢(+30%)",weak:"弱(+10%)",miss:"未达标",pre_fail:"破位失败",timeout:"超时未启动"};
+    var CN={waiting:"等待启动",launched:"已启动·跟踪中",win_strong:"大赢(+80%)",win:"赢(+30%)",weak:"弱(+10%)",miss:"未走远",pre_fail:"破位止损-20%",timeout:"45天超时"};
+    function ageDays(ts){ if(!ts) return "—"; var t=Date.parse(ts); if(isNaN(t)) return "—"; return Math.max(0,Math.floor((Date.now()-t)/86400000))+"天"; }
     var rows="";
     (am.entries||[]).forEach(function(e){
-      var g=e.peak_gain, gs=(typeof g==="number")?((g>=0?"+":"")+(g*100).toFixed(0)+"%"):"—";
-      var note=e.status==="launched"&&e.launch_delay_d!=null?("启动延迟"+e.launch_delay_d+"天"):(e.score!=null?("信号分"+Math.round(e.score)):"");
-      rows+='<tr><td class="ts">'+(e.ts||"").slice(0,16).replace("T"," ")+'</td>'+
-        '<td class="ssym">'+(e.sym||"")+'</td>'+
+      var ep=e.entry_price, lp=e.last_price;
+      var fl=(typeof lp==="number"&&typeof ep==="number"&&ep>0)?((lp/ep-1)*100).toFixed(1)+"%":"—";
+      var stop=(typeof ep==="number"&&ep>0)?fmtPrice(ep*0.8):"—";
+      var tgt=(typeof ep==="number"&&ep>0)?fmtPrice(ep*1.3):"—";
+      rows+='<tr><td class="ssym">'+(e.sym||"")+'</td>'+
+        '<td class="ts">'+(e.ts||"").slice(0,10)+'</td>'+
         '<td class="ts">'+(e.source==="live"?"实盘":"回填")+'</td>'+
+        '<td>'+fmtPrice(ep)+'</td>'+
+        '<td>'+fmtPrice(lp)+'</td>'+
+        '<td class="sc">'+fl+'</td>'+
+        '<td class="rs" style="color:#f87171">'+stop+'</td>'+
+        '<td class="rs" style="color:#4ade80">'+tgt+'</td>'+
+        '<td class="rs">'+ageDays(e.ts)+'</td>'+
+        '<td><span class="tag" style="background:'+(SC[e.status]||"#6b7280")+'">'+(CN[e.status]||e.status)+'</span></td></tr>';
+    });
+    amr.innerHTML = rows || '<tr><td colspan="10" class="rs">（暂无在途仓位——埋伏触发后自动开始跟踪）</td></tr>';
+    var frows="";
+    (am.recent_finals||[]).forEach(function(e){
+      var g=e.peak_gain, gs=(typeof g==="number")?((g>=0?"+":"")+(g*100).toFixed(0)+"%"):"—";
+      frows+='<tr><td class="ssym">'+(e.sym||"")+'</td>'+
+        '<td class="ts">'+(e.ts||"").slice(0,10)+'</td>'+
         '<td>'+fmtPrice(e.entry_price)+'</td>'+
         '<td><span class="tag" style="background:'+(SC[e.status]||"#6b7280")+'">'+(CN[e.status]||e.status)+'</span></td>'+
-        '<td class="sc">'+gs+'</td>'+
-        '<td>'+fmtPrice(e.last_price)+'</td>'+
-        '<td class="rs">'+note+'</td></tr>';
+        '<td class="sc">'+gs+'</td></tr>';
     });
-    amr.innerHTML = rows || '<tr><td colspan="8" class="rs">（暂无埋伏记录——信号触发后自动开始跟踪）</td></tr>';
-    var bk=s.buckets||{}, bs=[];
-    for(var k in bk){ if(bk[k].n) bs.push(k+"分:"+bk[k].n+"笔·启动"+p1(bk[k].launch_rate)); }
-    amn.innerHTML = "口径：45天内启动=成功启动｜启动前−20%=破位失败｜启动后20天峰值计胜负(+80%大赢/+30%赢/+10%弱)"+(bs.length?(" ｜ 分数段: "+bs.join(" · ")):"")+" ｜ 回填样本来自缓存K线（有偏），实盘样本才是干净口径";
+    if(fr) fr.innerHTML = frows || '<tr><td colspan="5" class="rs">（暂无收官记录）</td></tr>';
+    amn.innerHTML = "口径：45天内启动=成功启动｜启动前−20%=破位止损｜启动后20天峰值计胜负(+80%大赢/+30%赢/+10%弱) ｜ 回填样本来自缓存K线（有偏），实盘样本才是干净口径";
   } else if(amk){
     document.getElementById("ambcard").style.display="none";
+  }
+  // review card（复盘 · 胜率验证）
+  var rv=am&&am.review, rk2=document.getElementById("revkpis"), rn2=document.getElementById("revnote");
+  if(rk2&&rv&&rv.evaluated){
+    var ov2=rv.overall||{};
+    rk2.innerHTML =
+      '<div class="kpi">已结算 <b>'+rv.evaluated+'</b> 轮</div>'+
+      '<div class="kpi">整体胜率 <b style="color:#22c55e">'+p1(ov2.rate)+'</b>（赢+大赢）</div>'+
+      '<div class="kpi">平均峰值 <b>'+((typeof ov2.avg_peak==="number")?("+"+(ov2.avg_peak*100).toFixed(0)+"%"):"—")+'</b></div>'+
+      '<div class="kpi">启动率 <b>'+p1(ov2.launch_rate)+'</b></div>';
+    var ms=[];
+    for(var m in (rv.monthly||{})){ var dd=rv.monthly[m]; if(dd.n) ms.push(m+": "+p1(dd.rate)+"(n="+dd.n+")"); }
+    var c=rv.cond||{};
+    function csLine(k2,label){ var x=c[k2]; if(x&&x.n) return label+" "+p1(x.rate)+"(n="+x.n+")"; return null; }
+    var cl=[csLine("last_win","上轮胜→"),csLine("fresh","首战→"),csLine("lose1","上轮败→"),csLine("lose2p","连败≥2→")].filter(Boolean);
+    var dist=rv.dist||{}; var ds=[];
+    var DCN={win_strong:"大赢",win:"赢",weak:"弱",miss:"未走远",pre_fail:"破位止损",timeout:"超时"};
+    for(var st2 in dist){ ds.push((DCN[st2]||st2)+" "+dist[st2]); }
+    rn2.innerHTML =
+      (ds.length?("结局分布："+ds.join(" ｜ ")+"<br>"):"")+
+      (cl.length?("条件胜率（重入评分依据）："+cl.join(" ｜ ")+"<br>"):"")+
+      (ms.length>1?("按月胜率："+ms.slice(-8).join(" ｜ ")+"<br>"):"")+
+      "口径提醒：胜=峰值曾达+30%，不保证满仓吃到；滑点会吃掉一部分。Telegram 发 /review 可随时查看。";
+  } else if(rk2){
+    document.getElementById("revcard").style.display="none";
   }
 }
 function tick(){

@@ -70,7 +70,7 @@ check("go ranked first", s.index("GOUSDT") < s.index("WAITUSDT") < s.index("CHKU
 check("non-vol coin hidden", "SKIPUSDT" not in s)
 check("go verdict text", "✅ 可入场" in s)
 check("wait verdict text", "⏳ 挂单等点位" in s)
-check("chk verdict text", "量能首现·等下轮确认" in s)
+check("chk verdict text", "量能首现·等确认窗" in s)
 check("footer points to /ambush all", "/ambush all" in s)
 
 # 4) 次级半仓判定

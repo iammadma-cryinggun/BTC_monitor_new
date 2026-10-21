@@ -80,6 +80,13 @@ EVENT_LEVELS = {"ENTER", "DIP", "TOP", "MA25", "MA99", "CRASH", "BOUNCE"}
 # event key once, so this is purely a memory bound
 FIRED_EVENT_TTL_DAYS = 14
 
+# 量能确认的墙钟门槛（小时）。2026-10-21 扫描间隔从 2h 收到 1h 后，"连续两扫"
+# 只隔 1 小时——两次大概率落在同一根 4h K 里（局部量只增不减），streak 会原地
+# 堆积，确认质量退化。vt_confirmed 因此要求 streak>=2 且量能抬头已持续
+# CONFIRM_MIN_H 小时：1h 扫描下第 3 扫（~2h）确认，2h 扫描下第 2 扫确认——
+# 与旧节奏等价的证据强度。测试可通过 monitor.CONFIRM_MIN_H = 0 关掉时间维度。
+CONFIRM_MIN_H = 1.5
+
 _STATUS_SHORT = {"pre_fail": "破位-20%", "timeout": "45天超时",
                  "miss": "启动未走远", "weak": "弱+10%"}
 
@@ -231,7 +238,7 @@ DEFAULT_CONFIG = {
     "market": "futures",
     "universe": "exchange",         # "exchange" (full ~400 perps, curated fallback) | "curated" | "list"
     "symbols": [],                  # used when universe=="list"
-    "scan_interval_minutes": 120,   # 信号扫描间隔
+    "scan_interval_minutes": 60,    # 信号扫描间隔（2026-10-21 用户指令：每小时更新一次）
     "digest_hour": 8,               # 本地时区的每日摘要时刻（小时）
     "local_utc_offset_hours": 8,    # 本地时区相对 UTC 的偏移（北京时间=8）
     "request_sleep": 0.15,          # 每币之间的 sleep，防封
@@ -385,14 +392,21 @@ def classify(sym, rec, prev, btc_regime=None, market="futures"):
                 fd_s = f"\n当前资金费率 {fd*100:+.3f}%（空头挤爆在付钱）—— 剧本：极端负费率不是底。"
             signals.append(("BOUNCE",
                 f"{sym} 崩后巨量反弹（{note}）。这是阶段6，不是底，别追。{fd_s}", e))
-    # 埋伏★：COILING + 量能抬头连续两轮扫描确认（vt_streak 刚跨过 2）。
-    # vol_tick 单轮 True 不可信：4h K 每根会被 2h 扫描采样两次（成形中/收盘后
+    # 埋伏★：COILING + 量能抬头确认（vt_confirmed 刚翻转为 True）。
+    # vol_tick 单轮 True 不可信：4h K 每根会被扫描采样多次（成形中/收盘后
     # 量不同），网络失败轮走 cached fallback 时 vol_tick=False，True/False 闪烁
-    # 会让"状态转换"反复重触发（实测一轮重发过 107 条）。streak 由 run_scan
-    # 维护在 state 里；发射端另有按 tracker 活跃 entry 的去重兜底。
+    # 会让"状态转换"反复重触发（实测一轮重发过 107 条）。vt_confirmed =
+    # streak>=2 且已持续 CONFIRM_MIN_H 小时（1h 扫描节奏下的等效双扫确认）；
+    # streak 由 run_scan 维护在 state 里；发射端另有按 tracker 活跃 entry 的
+    # 去重兜底。旧调用方不带 vt_confirmed 时退回 streak>=2 判定。
     _streak = rec.get("vt_streak") or 0
-    _prev_streak = (prev.get("vt_streak") or 0) if prev else 0
-    if (rec["label"] == "COILING" and _streak >= 2 and _prev_streak < 2):
+    _conf = rec.get("vt_confirmed")
+    if _conf is None:
+        _conf = _streak >= 2
+    _prev_conf = prev.get("vt_confirmed") if prev else None
+    if _prev_conf is None:
+        _prev_conf = ((prev.get("vt_streak") or 0) >= 2) if prev else False
+    if (rec["label"] == "COILING" and _conf and not _prev_conf):
         pv = rec.get("pv")
         pv_s = f"{pv*100:+.0f}%" if pv is not None else "n/a"
         # derivatives context: negative funding + rising OI while coiling =
@@ -421,9 +435,9 @@ def classify(sym, rec, prev, btc_regime=None, market="futures"):
             f"打法：横盘区内即可分批埋伏（本信号即入场窗口，-20%破位止损）；\n"
             f"或等 🚀ENTER（第一根巨量突破）确认后再入——更稳但价更高。"
             + timing_gate(sym, market, btc_regime, "ambush"), None))
-    # 次级蓄力★：COILING_LITE + 量能抬头连续两轮确认（同主档的 flicker 防抖）。
+    # 次级蓄力★：COILING_LITE + 量能抬头确认（同主档的时间感知防抖）。
     # 大盘币新周期形态：20 日振幅不够妖币门槛，用更久横盘 + 贴 MA99 补偿。
-    if (rec["label"] == "COILING_LITE" and _streak >= 2 and _prev_streak < 2):
+    if (rec["label"] == "COILING_LITE" and _conf and not _prev_conf):
         pv = rec.get("pv")
         pv_s = f"{pv*100:+.0f}%" if pv is not None else "n/a"
         fd = rec.get("funding"); oc = rec.get("oi_chg_24h")
@@ -855,11 +869,11 @@ class Monitor:
             prev = state.get(sym)
             # vol_tick hysteresis: consecutive scans where the coin is coiling
             # with the volume tick ON. A single True is noise (each 4h bar is
-            # sampled twice per 2h-scan cycle; cached-fallback rounds read
-            # vol_tick=False), so AMBUSH requires the streak to cross 2 —
-            # classify() reads vt_streak from the rec. Label excursions
-            # (coil -> launch -> re-coil) reset the streak, so a genuinely
-            # NEW episode still fires.
+            # sampled several times per scan cycle at the 1h cadence;
+            # cached-fallback rounds read vol_tick=False), so AMBUSH requires
+            # vt_confirmed — streak crossing 2 AND persisting CONFIRM_MIN_H
+            # wall-clock hours. Label excursions (coil -> launch -> re-coil)
+            # reset the streak, so a genuinely NEW episode still fires.
             _ready = (rec.get("label") in ("COILING", "COILING_LITE")
                       and bool(rec.get("vol_tick")))
             # NOTE the prev guard: on a baseline scan (or after a volume wipe)
@@ -868,7 +882,22 @@ class Monitor:
             # 2026-10-19 incident) and, inside the while loop, killed the
             # monitor thread entirely while the dashboard kept serving frozen
             # data forever.
-            rec["vt_streak"] = (((prev.get("vt_streak") or 0) if prev else 0) + 1) if _ready else 0
+            if _ready:
+                rec["vt_streak"] = (((prev.get("vt_streak") or 0) if prev else 0) + 1)
+                rec["vt_since"] = (prev.get("vt_since") if prev else None) or now_iso()
+            else:
+                rec["vt_streak"] = 0
+                rec["vt_since"] = None
+            # time-aware confirmation: streak>=2 AND the tick has persisted
+            # >= CONFIRM_MIN_H wall-clock hours (see CONFIRM_MIN_H comment).
+            try:
+                _el_h = ((datetime.now(timezone.utc)
+                          - datetime.fromisoformat(rec["vt_since"])).total_seconds() / 3600
+                         if rec.get("vt_since") else 0.0)
+            except Exception:
+                _el_h = 0.0
+            rec["vt_confirmed"] = bool(rec["vt_streak"] >= 2
+                                       and _el_h >= CONFIRM_MIN_H)
             # 大盘 context for gate messages = ENVIRONMENT regime (4h/1d,
             # matches the holding window); fall back to the 15m regime only
             # when the env fetch failed.
@@ -881,6 +910,8 @@ class Monitor:
                 "pv": rec.get("pv"), "ma99_1h": rec.get("ma99_1h"),
                 "flat_run": rec.get("flat_run"), "range_w": rec.get("range_w"),
                 "vt_streak": rec["vt_streak"],
+                "vt_since": rec.get("vt_since"),
+                "vt_confirmed": rec.get("vt_confirmed", False),
                 "event_sigs": list(cur_sigs), "updated": now_iso(),
                 "first_seen": (prev.get("first_seen") if prev else now_iso()),
             }

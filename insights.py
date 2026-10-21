@@ -100,6 +100,19 @@ def launch_window_note(lw):
 
 
 # ----------------------------------------------------------------------------
+# vol_confirmed: the single source of truth for "埋伏★ 已触发" across the
+# dashboard / telegram / KPI counts. monitor sets a time-aware vt_confirmed on
+# every ranked rec (streak>=2 AND persisted >= CONFIRM_MIN_H); older callers
+# and test fixtures that only carry vt_streak fall back to streak>=2.
+# ----------------------------------------------------------------------------
+def vol_confirmed(r):
+    v = r.get("vt_confirmed")
+    if v is not None:
+        return bool(v)
+    return (r.get("vt_streak") or 0) >= 2
+
+
+# ----------------------------------------------------------------------------
 # per-coin re-entry record: the "same-coin compounding" evidence
 # ----------------------------------------------------------------------------
 def coin_history(entries, sym):
