@@ -509,17 +509,21 @@ class TelegramAgent:
             import timing as _timing
             _mk = getattr(self.monitor, "market", "futures")
             t = _timing.analyze(sym, market=_mk)
-            rg = _timing.regime(market=_mk)
+            env = _timing.env_regime(market=_mk) or {}
+            rg = env.get("r") or _timing.regime(market=_mk)
         except Exception:
-            t, rg = None, None
+            t, rg, env = None, None, {}
         if t:
             vd = t.get("vwap_dist")
             vd_s = f"{vd*100:+.1f}%" if isinstance(vd, (int, float)) else "—"
             rg_s = {"bullish": "多头", "bearish": "空头", "neutral": "中性"}.get(rg, "—")
             gate = "就绪 ⚡（价>VWAP 且 EMA9>20）" if t.get("ready") else "未就绪 ✋"
             warn = "（大盘逆风：新仓减半或推迟）" if rg == "bearish" else ""
+            legs = ""
+            if env.get("r4h") or env.get("r1d"):
+                legs = f"（4h {env.get('r4h') or '—'}/1d {env.get('r1d') or '—'}）"
             lines.append(f"📍 点位（15m）：{gate} · 价 vs VWAP {vd_s} · "
-                         f"EMA{'多头' if t.get('ema_bull') else '空头'} · 大盘 BTC {rg_s}{warn}")
+                         f"EMA{'多头' if t.get('ema_bull') else '空头'} · 大盘环境 4h/1d {rg_s}{legs}{warn}")
         lines.append("")
         lines.append(verdict)
         # tracker context if present

@@ -101,6 +101,72 @@ def regime(market="futures", max_age=600):
     return r
 
 
+_env_cache = {}     # market -> (ts, env dict)
+
+
+def env_regime(market="futures", max_age=1800):
+    """BTC ENVIRONMENT regime on 4h + 1d — the timescale that matches the
+    strategy's holding window (weeks).
+
+    2026-10-21 user review: the 15m regime was judging "大盘环境" on a
+    timescale that flips intraday — a mismatch for a strategy whose rounds
+    run days to 45 days. The 15m layer stays for ENTRY timing (per-coin
+    ⚡/✋ marks); this env layer feeds the 大盘 wording in gate messages
+    and the regime_log calibration columns.
+
+    4h leg: price vs rolling 7-day VWAP AND EMA9>EMA20 (4h closes)
+    1d leg: price vs EMA20 (1d closes)
+    combined: bullish = both legs bullish; bearish = EITHER leg bearish
+    (conservative — a lower-TF bounce does not veto a broken daily trend);
+    neutral otherwise.
+
+    Returns dict(r, r4h, r1d) or None when both fetches fail. Cached 30 min.
+    """
+    now = _time.time()
+    hit = _env_cache.get(market)
+    if hit and now - hit[0] < max_age:
+        return hit[1]
+    out = None
+    try:
+        r4h = r1d = None
+        df4 = fetch_klines("BTCUSDT", "4h", 150, market=market)
+        if df4 is not None and len(df4) >= 60:
+            c = df4["close"].values
+            h = df4["high"].values
+            l = df4["low"].values
+            v = df4["volume"].values
+            price = float(c[-1])
+            n = min(42, len(c))                 # rolling 7 days of 4h bars
+            tp = (h[-n:] + l[-n:] + c[-n:]) / 3.0
+            vv = v[-n:]
+            vwap = float((tp * vv).sum() / vv.sum()) if vv.sum() > 0 else price
+            e9 = float(df4["close"].ewm(span=EMA_FAST, adjust=False).mean().iloc[-1])
+            e20 = float(df4["close"].ewm(span=EMA_SLOW, adjust=False).mean().iloc[-1])
+            if price > vwap and e9 > e20:
+                r4h = "bullish"
+            elif price < vwap and e9 < e20:
+                r4h = "bearish"
+            else:
+                r4h = "neutral"
+        df1 = fetch_klines("BTCUSDT", "1d", 120, market=market)
+        if df1 is not None and len(df1) >= 30:
+            price1 = float(df1["close"].values[-1])
+            ma20 = float(df1["close"].ewm(span=20, adjust=False).mean().iloc[-1])
+            r1d = "bullish" if price1 > ma20 else "bearish"
+        if r4h and r1d:
+            if r4h == "bullish" and r1d == "bullish":
+                r = "bullish"
+            elif r4h == "bearish" or r1d == "bearish":
+                r = "bearish"
+            else:
+                r = "neutral"
+            out = dict(r=r, r4h=r4h, r1d=r1d)
+    except Exception:
+        out = None
+    _env_cache[market] = (now, out)
+    return out
+
+
 def _selftest():
     """Offline math check with a synthetic frame (no network)."""
     import pandas as pd

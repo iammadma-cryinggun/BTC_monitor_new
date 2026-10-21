@@ -62,6 +62,12 @@ DATA = os.path.join(HERE, "data")
 SIG_EMOJI = {"ENTER": "🚀", "DIP": "💧", "AMBUSH": "🔥", "TOP": "⚠️",
              "MA25": "📉", "MA99": "🚪", "CRASH": "🩸", "BOUNCE": "↩️",
              "AMBUSH_LITE": "🔵", "TP": "🎯", "OUT": "🏁"}
+# Telegram title display names (2026-10-21 user review: "TP 信号" read like
+# take-profit/entry advice and misled — titles now say what the push IS:
+# AMBUSH family = actionable entry signals; TP/OUT = position management for
+# coins already entered at an earlier AMBUSH, never new-entry invitations).
+SIG_TITLE = {"AMBUSH": "埋伏触发·可入场", "AMBUSH_LITE": "次级埋伏·可入场",
+             "TP": "持仓动态", "OUT": "埋伏收官"}
 SIG_ORDER = ["ENTER", "TP", "AMBUSH", "AMBUSH_LITE", "OUT", "DIP", "TOP", "MA25", "MA99", "CRASH", "BOUNCE"]
 
 # event-keyed signal levels: their identity is (sym, event_sig) — these get the
@@ -120,17 +126,19 @@ def outcome_event_signal(evd):
     if evd.get("ev") == "launched":
         g = evd.get("gain")
         return ("TP",
-                f"{sym} 🎯 埋伏命中启动：{evd.get('day')} 的信号等了 "
+                f"{sym} 🎯 埋伏命中启动（持仓通知，非新入场信号）：{evd.get('day')} 的信号等了 "
                 f"{evd.get('delay_d')} 天终于启动。\n"
+                f"已持仓：S3 洗盘别丢仓位，S3→S4 主升。\n"
+                f"未持仓：现在追高违反剧本 —— 等回踩企稳，或等该币下个新周期再埋伏。\n"
                 f"入场 {evd.get('entry_price'):.6g} → 启动价 {evd.get('launched_price'):.6g}"
-                f"（{_fmt_pct(g)}）。按剧本：S3 洗盘别丢仓位，S3→S4 主升。")
+                f"（{_fmt_pct(g)}）。")
     if evd.get("ev") == "milestone":
         lvl = evd.get("level")
         tag = "第一档止盈区（+30%）" if lvl == 0.30 else "大赢区（+80%）"
         return ("TP",
-                f"{sym} 🎯 埋伏达标：峰值 {_fmt_pct(evd.get('gain'))}，进入{tag}。\n"
-                f"止盈阶梯参考：+50% 卖 1/3、+100% 再卖 1/3、剩余移动止损。"
-                + ("" if lvl == 0.30 else "这已经是 win_strong 级别的走势。"))
+                f"{sym} 🎯 埋伏达标（持仓通知）：峰值 {_fmt_pct(evd.get('gain'))}，进入{tag}。\n"
+                f"已持仓按阶梯执行：+50% 卖 1/3、+100% 再卖 1/3、剩余移动止损。未持仓无需动作。"
+                + ("" if lvl == 0.30 else "\n这已经是 win_strong 级别的走势。"))
     if evd.get("ev") == "final":
         st = evd.get("status")
         pg = evd.get("peak_gain")
@@ -319,8 +327,8 @@ def timing_gate(sym, market="futures", btc_regime=None, kind="enter"):
             return (f"\n🟢 点位闸门开：15m 价>VWAP + EMA9>20 多头（大盘{rg}）。"
                     f"可按突破进场，带止损。")
         if ok and btc_regime == "bearish":
-            return ("\n🟡 点位就绪，但大盘逆风（BTC 15m 空头排列）：减半仓，"
-                    "或等 BTC 回上 VWAP 再加。")
+            return ("\n🟡 点位就绪，但大盘逆风（BTC 4h/1d 环境空头）：减半仓，"
+                    "或等环境转多再加。")
         return (f"\n🔴 点位未就绪（15m 价 vs VWAP {t['vwap_dist']*100:+.1f}%，"
                 f"EMA{'多头' if t['ema_bull'] else '空头'}）：等价回上 VWAP 再进，防假突破砸回。")
     if ok:
@@ -538,6 +546,12 @@ class Monitor:
         fresh+launched share (money already moving), crashing share (risk-off).
         Paired with per-entry outcomes in the tracker this becomes the
         regression dataset for a future regime gate.
+
+        Columns (2026-10-21): btc = legacy 15m regime (kept for continuity
+        with existing rows); btc_4h / btc_1d = environment regime legs so
+        the future gate decision can compare BOTH timescales against
+        outcomes — the 15m layer only suits entry timing, the holding
+        window is days-to-weeks.
         """
         from collections import Counter as _C
         lab = _C(str(r.get("label") or "?") for r in (ranked or []))
@@ -545,7 +559,9 @@ class Monitor:
         if not n:
             return
         share = lambda k: round(lab.get(k, 0) / n, 3)
+        env = getattr(self, "btc_env", None) or {}
         row = dict(ts=now_iso(), n=n, btc=btc_regime,
+                   btc_4h=env.get("r4h"), btc_1d=env.get("r1d"),
                    coiling=share("COILING"), lite=share("COILING_LITE"),
                    fresh=share("FRESH_LAUNCH"), launched=share("LAUNCHED"),
                    pumped=share("PUMPED"), crashing=share("CRASHING"))
@@ -708,6 +724,23 @@ class Monitor:
                     print(f"[timing] BTC 15m regime: {self.btc_regime}")
             except Exception as e:
                 print(f"[timing] regime failed: {e}")
+        # BTC ENVIRONMENT regime on 4h/1d (2026-10-21 user review): the 15m
+        # regime judged 大盘环境 on a timescale that flips intraday —
+        # mismatched with a holding window of days-to-45-days. The 15m layer
+        # stays for per-coin entry timing (⚡/✋); env_regime feeds the 大盘
+        # context in gate messages + the regime_log calibration columns
+        # (btc_4h / btc_1d), so the future gate decision has data for BOTH
+        # timescales and can pick with evidence.
+        self.btc_env = None
+        if not offline:
+            try:
+                import timing
+                self.btc_env = timing.env_regime(market=self.market)
+                if self.btc_env:
+                    print(f"[timing] BTC env (4h/1d): {self.btc_env['r']} "
+                          f"(4h {self.btc_env['r4h']}, 1d {self.btc_env['r1d']})")
+            except Exception as e:
+                print(f"[timing] env regime failed: {e}")
         # scan budget: never let one round crawl for hours. With the kline-host
         # probe a healthy round takes minutes; if we blow past the budget the
         # egress is pathological — finish with what we have and let the outage
@@ -835,8 +868,12 @@ class Monitor:
             # monitor thread entirely while the dashboard kept serving frozen
             # data forever.
             rec["vt_streak"] = (((prev.get("vt_streak") or 0) if prev else 0) + 1) if _ready else 0
+            # 大盘 context for gate messages = ENVIRONMENT regime (4h/1d,
+            # matches the holding window); fall back to the 15m regime only
+            # when the env fetch failed.
+            _gate_regime = (self.btc_env or {}).get("r") or self.btc_regime
             signals, cur_sigs = classify(sym, rec, prev,
-                                         btc_regime=self.btc_regime, market=self.market)
+                                         btc_regime=_gate_regime, market=self.market)
             state_out[sym] = {
                 "label": rec["label"], "stage": rec["stage"], "score": rec["score"],
                 "vol_tick": rec.get("vol_tick"), "price": rec["price"],
@@ -1026,7 +1063,9 @@ class Monitor:
                     continue
                 if lvl == "ENTER":
                     n_enter += 1
-                self.notifier.send(f"{SIG_EMOJI.get(lvl,'')} {lvl} 信号 · {sym}", msg, level=lvl)
+                self.notifier.send(
+                    f"{SIG_EMOJI.get(lvl,'')} {SIG_TITLE.get(lvl, lvl + ' 信号')} · {sym}",
+                    msg, level=lvl)
             if batch_lines:
                 shown = batch_lines[:40]
                 extra = len(batch_lines) - len(shown)
@@ -1067,12 +1106,19 @@ class Monitor:
         rg = None
         try:
             import timing as _timing
-            rg = _timing.regime(market=self.market) or getattr(self, "btc_regime", None)
+            rg = ((self.btc_env or {}).get("r")
+                  or _timing.regime(market=self.market)
+                  or getattr(self, "btc_regime", None))
         except Exception:
-            rg = getattr(self, "btc_regime", None)
+            rg = ((self.btc_env or {}).get("r")
+                  or getattr(self, "btc_regime", None))
         if rg:
             _cn = {"bullish": "多头", "bearish": "空头", "neutral": "中性"}.get(rg, rg)
-            lines.append(f"大盘点位闸门（BTC 15m VWAP+EMA）：{_cn}"
+            env = getattr(self, "btc_env", None) or {}
+            _legs = ""
+            if env.get("r4h") or env.get("r1d"):
+                _legs = f"（4h {env.get('r4h') or '—'} / 1d {env.get('r1d') or '—'}）"
+            lines.append(f"大盘环境（BTC 4h/1d）：{_cn}{_legs}"
                          + ("——逆风期，新埋伏减半或推迟" if rg == "bearish" else ""))
         # battle report FIRST: what happened to previous live calls — the
         # closed loop must lead the digest, or it drowns under the fresh

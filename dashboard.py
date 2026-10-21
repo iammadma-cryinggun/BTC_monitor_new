@@ -120,6 +120,41 @@ def _timing_mark(r):
     return "⚡" if t.get("ready") else "✋"
 
 
+_ACTION_COLOR = {"go": "#22c55e", "go2": "#38bdf8", "wait": "#fbbf24",
+                 "chk": "#9ca3af", "no": "#6b7280"}
+
+
+def _action_cell(r):
+    """Direct-advice column (2026-10-21 user review: "我不需要什么观察，我只
+    需要你直接的建议"). Collapses the two orthogonal dimensions — volume
+    signal (vol_tick streak) x 15m timing gate — into ONE recommended action:
+
+      go    可入场        signal confirmed (streak>=2) AND 15m timing ready
+      wait  挂单等点位    signal confirmed but timing not ready / unmeasured
+      chk   量能首现      vol_tick on the FIRST scan only — streak 1/2, the
+                          AMBUSH signal has NOT fired yet (needs 2 in a row)
+      no    —             not an ambush entry (launched/pumped/... etc)
+    """
+    lab = r.get("label")
+    vt = bool(r.get("vol_tick"))
+    st = r.get("vt_streak") if isinstance(r.get("vt_streak"), (int, float)) else 0
+    t = r.get("timing") or {}
+    has_t = t.get("ready") in (True, False)
+    if lab == "COILING" and vt:
+        if st >= 2:
+            return ("go", "✅ 可入场") if (has_t and t.get("ready")) else ("wait", "⏳ 挂单等点位")
+        return ("chk", "量能首现·等下轮确认")
+    if lab == "COILING_LITE" and vt:
+        if st >= 2:
+            return ("go2", "✅ 次级可入场·半仓") if (has_t and t.get("ready")) else ("wait", "⏳ 次级·挂单等点位")
+        return ("chk", "次级·量能首现")
+    if lab == "FRESH_LAUNCH":
+        return ("no", "已启动·等S3回踩")
+    if lab in ("COILING", "COILING_LITE"):
+        return ("no", "等量能（未触发）")
+    return ("no", "—")
+
+
 def _disp_label(r):
     lab = r.get("label")
     tm = _timing_mark(r)
@@ -273,17 +308,20 @@ def build_dashboard_html(ranked, signals, meta=None):
                 + ' ｜ 跳过多为 symbol 已被下架/不在该市场，或瞬时被限流（下一轮缓存命中即可恢复）</div>')
 
     watch = [r for r in ranked if r.get("label") in ("COILING", "COILING_LITE", "FRESH_LAUNCH")]
-    watch.sort(key=lambda r: -(r["ev_pts"] if isinstance(r.get("ev_pts"), (int, float))
+    # actionable rows (vol_tick on) lead the static snapshot too — direct
+    # advice first, un-triggered observation after (2026-10-21 user review)
+    watch.sort(key=lambda r: (-int(bool(r.get("vol_tick"))),
+                              -(r["ev_pts"] if isinstance(r.get("ev_pts"), (int, float))
                                 else (r.get("potential") if r.get("potential") is not None
-                                      else r.get("score", 0))))
+                                      else r.get("score", 0)))))
     others = [r for r in ranked if r.get("label") not in ("COILING", "COILING_LITE", "FRESH_LAUNCH")]
     others.sort(key=lambda r: -r.get("score", 0))
     capped = len(others) > 150
     others_disp = others[:150] if capped else others
     ordered = watch + others_disp
 
-    watch_rows = "".join(_row(r) for r in watch) or '<tr><td colspan="13" class="rs">（暂无观察候选）</td></tr>'
-    full_rows = "".join(_row(r) for r in ordered) or '<tr><td colspan="13" class="rs">（无数据）</td></tr>'
+    watch_rows = "".join(_row(r) for r in watch) or '<tr><td colspan="14" class="rs">（暂无可入场候选）</td></tr>'
+    full_rows = "".join(_row(r) for r in ordered) or '<tr><td colspan="14" class="rs">（无数据）</td></tr>'
 
     sig_rows = ""
     for s in signals[-30:][::-1]:
@@ -357,15 +395,15 @@ th{{color:var(--mut);font-weight:600;position:sticky;top:0;background:var(--card
 </div>
 
 <div class="card">
-  <div class="h2">🔥 观察候选列表（按证据分排序 = 潜力+历史战绩+逼空燃料+点位；横盘蓄力 / 刚启动，盯紧第一根巨量突破；标签 🔥埋伏★ = 量能已抬头、接近 AMBUSH 触发；⚡=15m点位就绪：价>VWAP且EMA9>20，✋=未就绪）</div>
-  <table><tr><th>币种</th><th>标签</th><th>阶段</th><th>分</th><th>潜力</th><th>证据分</th><th>现价</th><th>vsMA99</th><th>1hMA99</th><th>OI·费率</th><th>~1日</th><th>4h走势</th><th>依据</th></tr>
+  <div class="h2">🔥 可入场列表（埋伏★=量能已抬头并连续 2 扫确认；动作列=直接建议：可入场=信号确认+15m点位共振，挂单等点位=区间内挂单等回踩企稳；⚡=点位就绪，✋=未就绪）</div>
+  <table><tr><th>币种</th><th>标签</th><th>动作</th><th>阶段</th><th>分</th><th>潜力</th><th>证据分</th><th>现价</th><th>vsMA99</th><th>1hMA99</th><th>OI·费率</th><th>~1日</th><th>4h走势</th><th>依据</th></tr>
   {watch_rows}
   </table>
 </div>
 
 <div class="card">
   <div class="h2">📊 全量监控（按信号分排序，显示前 {len(ordered)} / 共 {n_coins}）</div>
-  <table><tr><th>币种</th><th>标签</th><th>阶段</th><th>分</th><th>潜力</th><th>证据分</th><th>现价</th><th>vsMA99</th><th>1hMA99</th><th>OI·费率</th><th>~1日</th><th>4h走势</th><th>依据</th></tr>
+  <table><tr><th>币种</th><th>标签</th><th>动作</th><th>阶段</th><th>分</th><th>潜力</th><th>证据分</th><th>现价</th><th>vsMA99</th><th>1hMA99</th><th>OI·费率</th><th>~1日</th><th>4h走势</th><th>依据</th></tr>
   {full_rows}
   </table>
   {('<div class="note">已按信号分截断显示前 150 行；全部 {0} 个币均已扫描，完整数据见 <code>data/monitor_state.json</code>。</div>'.format(len(others))) if capped else ''}
@@ -443,6 +481,8 @@ def _ev_cell(r):
 def _row(r):
     c = LAB_COLOR.get(r.get("label"), "#9ca3af")
     tag = _disp_label(r)
+    ak, atxt = _action_cell(r)
+    acol = _ACTION_COLOR.get(ak, "#6b7280")
     pv = r.get("pv")
     pv_s = f"{pv*100:+.0f}%" if isinstance(pv, (int, float)) else "n/a"
     m1 = r.get("ma99_1h")
@@ -455,6 +495,7 @@ def _row(r):
     reason = (r.get("reason") or "").replace("\n", " ")
     return (f'<tr><td class="sym">{r.get("sym","")}</td>'
             f'<td><span class="tag" style="background:{c}">{tag}</span></td>'
+            f'<td><b style="color:{acol};white-space:nowrap">{atxt}</b></td>'
             f'<td>S{(r.get("stage") or "?")[-1]}</td>'
             f'<td class="sc">{r.get("score",0):.0f}</td>'
             f'{_pot_cell(r)}'
@@ -499,13 +540,14 @@ th{color:var(--mut);font-weight:600;position:sticky;top:0;background:var(--card)
   <div id="health"></div>
 </div>
 <div class="card">
-  <div class="h2">🔥 观察候选列表（按证据分排序 = 潜力+历史战绩+逼空燃料+点位；横盘蓄力 / 刚启动，盯紧第一根巨量突破；标签 🔥埋伏★ = 量能已抬头、接近 AMBUSH 触发；⚡=15m点位就绪：价>VWAP且EMA9>20，✋=未就绪）</div>
-  <table><tr><th>币种</th><th>标签</th><th>阶段</th><th>分</th><th>潜力</th><th>证据分</th><th>现价</th><th>vsMA99</th><th>1hMA99</th><th>OI·费率</th><th>~1日</th><th>4h走势</th><th>依据</th></tr>
+  <div class="h2">🔥 可入场列表（埋伏★=量能已抬头并连续 2 扫确认；动作列=直接建议：可入场=信号确认+15m点位共振，挂单等点位=区间内挂单等回踩企稳；⚡=点位就绪，✋=未就绪）</div>
+  <div style="margin-bottom:10px"><button id="obsbtn" style="background:#161a22;border:1px solid #1f2937;color:#9ca3af;border-radius:8px;padding:6px 12px;font-size:12px;cursor:pointer">显示未触发的观察池</button> <span id="obscount" style="color:#9ca3af;font-size:11px"></span></div>
+  <table><tr><th>币种</th><th>标签</th><th>动作</th><th>阶段</th><th>分</th><th>潜力</th><th>证据分</th><th>现价</th><th>vsMA99</th><th>1hMA99</th><th>OI·费率</th><th>~1日</th><th>4h走势</th><th>依据</th></tr>
   <tbody id="watch"></tbody></table>
 </div>
 <div class="card">
   <div class="h2" id="fullh2">📊 全量监控</div>
-  <table><tr><th>币种</th><th>标签</th><th>阶段</th><th>分</th><th>潜力</th><th>证据分</th><th>现价</th><th>vsMA99</th><th>1hMA99</th><th>OI·费率</th><th>~1日</th><th>4h走势</th><th>依据</th></tr>
+  <table><tr><th>币种</th><th>标签</th><th>动作</th><th>阶段</th><th>分</th><th>潜力</th><th>证据分</th><th>现价</th><th>vsMA99</th><th>1hMA99</th><th>OI·费率</th><th>~1日</th><th>4h走势</th><th>依据</th></tr>
   <tbody id="full"></tbody></table>
   <div id="fullnote" class="note"></div>
 </div>
@@ -525,6 +567,17 @@ th{color:var(--mut);font-weight:600;position:sticky;top:0;background:var(--card)
 <div class="note" style="margin-top:6px">看板构建版本: <b>__BUILD_SHA__</b>（若与最新 commit 不一致，说明 Zeabur 仍在运行旧容器，需手动 Redeploy）</div>
 <script>
 var NEXT = 0;
+var SHOWOBS = false;   // show the un-triggered observation pool?
+var LASTD = null;      // last payload, for re-render on toggle
+try{ SHOWOBS = localStorage.getItem("show_observe")==="1"; }catch(e){}
+(function(){
+  var b=document.getElementById("obsbtn");
+  if(b) b.onclick=function(){
+    SHOWOBS=!SHOWOBS;
+    try{ localStorage.setItem("show_observe", SHOWOBS?"1":"0"); }catch(e){}
+    if(LASTD) render(LASTD);
+  };
+})();
 var LAB = {COILING:"#f59e0b",COILING_LITE:"#38bdf8",FRESH_LAUNCH:"#22c55e",LAUNCHED:"#0ea5e9",PUMPED:"#ef4444",CRASHING:"#6b7280",LOW_VOL:"#4b5563",STABLE:"#4b5563",STOCK:"#4b5563",UNKNOWN:"#9ca3af"};
 function tmark(r){
   var t=r.timing||{};
@@ -560,8 +613,24 @@ function evCell(r){
   return '<td class="rs"><b style="color:'+c+';font-size:13px">'+Math.round(r.ev_pts)+'</b>'+
     ' <span style="color:#9ca3af;font-size:11px">'+(r.ev_note||"")+'</span></td>';
 }
+function actionInfo(r){
+  var t=r.timing||{}, hasT=(t.ready===true||t.ready===false);
+  var st=(typeof r.vt_streak==="number")?r.vt_streak:0;
+  if(r.label==="COILING"&&r.vol_tick){
+    if(st>=2) return hasT&&t.ready?["go","#22c55e","✅ 可入场"]:["wait","#fbbf24","⏳ 挂单等点位"];
+    return ["chk","#9ca3af","量能首现·等下轮确认"];
+  }
+  if(r.label==="COILING_LITE"&&r.vol_tick){
+    if(st>=2) return hasT&&t.ready?["go2","#38bdf8","✅ 次级可入场·半仓"]:["wait","#fbbf24","⏳ 次级·挂单等点位"];
+    return ["chk","#9ca3af","次级·量能首现"];
+  }
+  if(r.label==="FRESH_LAUNCH") return ["no","#6b7280","已启动·等S3回踩"];
+  if(r.label==="COILING"||r.label==="COILING_LITE") return ["no","#6b7280","等量能（未触发）"];
+  return ["no","#6b7280","—"];
+}
 function row(r){
   var c=LAB[r.label]||"#9ca3af", tag=dispLabel(r);
+  var ai=actionInfo(r);
   var rs=(r.reason||"").replace(/\\n/g," ");
   var sc=(r.score!=null)?Math.round(r.score):0;
   var m1=r.ma99_1h, pv1=(m1&&m1>0&&r.price)?(r.price/m1-1):null;
@@ -572,6 +641,7 @@ function row(r){
   var dcell=dv.length?('<td class="rs">'+dv.join("·")+"</td>"):'<td class="rs">—</td>';
   return '<tr><td class="sym">'+(r.sym||"")+'</td>'+
     '<td><span class="tag" style="background:'+c+'">'+tag+'</span></td>'+
+    '<td><b style="color:'+ai[1]+';white-space:nowrap">'+ai[2]+'</b></td>'+
     '<td>S'+((r.stage||"?").toString().slice(-1))+'</td>'+
     '<td class="sc">'+sc+'</td>'+
     potCell(r)+
@@ -585,6 +655,7 @@ function row(r){
     '<td class="rs">'+rs+'</td></tr>';
 }
 function render(d){
+  LASTD = d;
   var meta=d.meta||{}, k=d.kpis||{}, ranked=d.ranked||[], sigs=d.signals||[];
   document.getElementById("sub").textContent =
     "生成 "+meta.generated+" ｜ 数据源 Binance USD-M 合约 ｜ 4h 六阶段 + 1h MA99 ｜ 时区 UTC ｜ 每 "+meta.scan_interval_minutes+" 分钟扫描一次（本页每 30 秒自动刷新）";
@@ -631,17 +702,25 @@ function render(d){
       '这通常是持久化卷上的旧快照残留（崩溃重启期间产生），并非行情拉取失败。<br>下一轮扫描（每 '+meta.scan_interval_minutes+' 分钟）会自动重写并恢复完整列表；若长期不恢复，可在 Zeabur 清空 /app/data 卷后重启。</div>';
   }
   document.getElementById("health").innerHTML = h;
-  // tables
-  var watch=ranked.filter(function(r){return r.label==="COILING"||r.label==="COILING_LITE"||r.label==="FRESH_LAUNCH";});
-  watch.sort(function(a,b){
-    function k(r){ return (typeof r.ev_pts==="number")?r.ev_pts:((typeof r.potential==="number")?r.potential:(r.score||0)); }
-    return k(b)-k(a);
-  });
+  // tables — default view = ACTIONABLE ONLY (vol_tick on = 埋伏★). The
+  // un-triggered observation pool hides behind the toggle (2026-10-21 user
+  // review: "我不需要什么观察，我只需要你直接的建议").
+  var actionable=ranked.filter(function(r){return (r.label==="COILING"||r.label==="COILING_LITE")&&r.vol_tick;});
+  var watchAll=ranked.filter(function(r){return r.label==="COILING"||r.label==="COILING_LITE"||r.label==="FRESH_LAUNCH";});
+  function evkey(r){ return (typeof r.ev_pts==="number")?r.ev_pts:((typeof r.potential==="number")?r.potential:(r.score||0)); }
+  actionable.sort(function(a,b){return evkey(b)-evkey(a);});
+  watchAll.sort(function(a,b){return evkey(b)-evkey(a);});
+  var watch=SHOWOBS?watchAll:actionable;
+  var hidden=watchAll.length-actionable.length;
+  var btn=document.getElementById("obsbtn");
+  if(btn) btn.textContent=SHOWOBS?("隐藏观察池（只看可行动 "+actionable.length+" 个）"):("显示未触发的观察池（"+hidden+" 个）");
+  var oc=document.getElementById("obscount");
+  if(oc) oc.textContent=SHOWOBS?("当前显示全部 "+watchAll.length+" 个（可行动 "+actionable.length+"）"):"";
   var others=ranked.filter(function(r){return r.label!=="COILING"&&r.label!=="COILING_LITE"&&r.label!=="FRESH_LAUNCH";});
   others.sort(function(a,b){return (b.score||0)-(a.score||0);});
   var capped=others.length>150, disp=watch.concat(others.slice(0,150));
-  document.getElementById("watch").innerHTML = watch.map(row).join("") || '<tr><td colspan="13" class="rs">（暂无观察候选）</td></tr>';
-  document.getElementById("full").innerHTML = disp.map(row).join("") || '<tr><td colspan="13" class="rs">（无数据）</td></tr>';
+  document.getElementById("watch").innerHTML = watch.map(row).join("") || '<tr><td colspan="14" class="rs">（暂无可入场候选——当前无埋伏★触发）</td></tr>';
+  document.getElementById("full").innerHTML = disp.map(row).join("") || '<tr><td colspan="14" class="rs">（无数据）</td></tr>';
   document.getElementById("fullh2").textContent = "📊 全量监控（按信号分排序，显示前 "+disp.length+" / 共 "+rok+"）";
   document.getElementById("fullnote").innerHTML = capped ? ("已按信号分截断显示前 150 行；全部 "+others.length+" 个币均已扫描，完整数据见 data/monitor_state.json。") : "";
   // signals

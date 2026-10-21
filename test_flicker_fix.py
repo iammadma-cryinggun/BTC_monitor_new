@@ -38,6 +38,8 @@ import types
 _fake_timing = types.ModuleType("timing")
 _fake_timing.analyze = lambda sym, market="futures": {"ready": True, "vwap_dist": 0.001, "ema_bull": True}
 _fake_timing.regime = lambda market="futures": "bullish"
+_fake_timing.env_regime = lambda market="futures": {"r": "bullish", "r4h": "bullish", "r1d": "bullish"}
+_fake_timing.REGIME_CN = {"bullish": "多头", "bearish": "空头", "neutral": "中性"}
 sys.modules["timing"] = _fake_timing
 monitor.timing = _fake_timing
 

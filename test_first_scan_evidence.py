@@ -152,8 +152,9 @@ try:
     mon.run_scan(emit=True)
     check("second scan: backfill NOT called again", len(BACKFILL_CALLS) == 1)
 
+    # title uses the CN display name (SIG_TITLE, 2026-10-21): 埋伏触发·可入场
     amb = [m for t, m, l in mon.notifier.sent
-           if "AMBUSH" in t and "TESTUSDT" in m]
+           if "埋伏触发·可入场" in t and "TESTUSDT" in m]
     check("second scan: AMBUSH fired (vt_streak crossed)", len(amb) >= 1)
     if amb:
         check("second scan: AMBUSH carries the historical launch-window note",

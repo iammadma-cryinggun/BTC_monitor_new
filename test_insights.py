@@ -263,7 +263,8 @@ mon = monitor.Monitor(CFG, FakeNotifier())
 mon.run_scan(emit=True)   # scan 1: baseline (vt_streak 0 -> 1), digest fires
 mon.run_scan(emit=True)   # scan 2: streak crosses 2 -> AMBUSH fires
 
-ambush_msgs = [s for s in mon.notifier.sent if "AMBUSH 信号" in s[0]]
+# title uses the CN display name (SIG_TITLE, 2026-10-21): 埋伏触发·可入场
+ambush_msgs = [s for s in mon.notifier.sent if "埋伏触发·可入场" in s[0]]
 check("monitor: AMBUSH fired on streak cross", len(ambush_msgs) == 1)
 if ambush_msgs:
     check("monitor: AMBUSH push carries the historical conclusion",
