@@ -148,14 +148,16 @@ def coin_history(entries, sym):
     fins = [e for e in _entries_or(entries)
             if e.get("sym") == sym and e.get("status") in
             ("win_strong", "win", "weak", "miss", "pre_fail", "timeout")]
+    # 2026-10-22 修复：恢复合并/回填重放会打破 tracker 的追加时序
+    # （ARK 案例：10/07 pre_fail 在索引 960，08/31 win_strong 却在 2749），
+    # "fins[-1] = 上轮"不再成立。按收官时间（缺失时退回入场 ts）排序后再判。
+    fins = sorted(fins, key=lambda e: e.get("final_ts") or e.get("ts") or "")
     wins = [e for e in fins if (e.get("peak_gain") or 0) >= WIN]
     peaks = [e.get("peak_gain") for e in fins
              if isinstance(e.get("peak_gain"), (int, float))]
     last_win = None
     lose_streak = 0
     if fins:
-        # entries are appended chronologically; scan from the end, skipping
-        # nothing (all fins are finalized rounds)
         last_win = (fins[-1].get("peak_gain") or 0) >= WIN
         if not last_win:
             for e in reversed(fins):

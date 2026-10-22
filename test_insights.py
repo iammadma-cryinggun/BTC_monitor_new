@@ -120,6 +120,29 @@ check("coin_history: AGO 1 round / 0 wins / best -0.25",
 h3 = insights.coin_history(hist_entries, "NOPEUSDT")
 check("coin_history: unknown coin = zero rounds", h3["rounds"] == 0)
 
+# 2026-10-22 ARK 案例：恢复合并打乱 tracker 追加时序后，"列表最后一条"不再是
+# 上轮——必须按收官时间判定。构造乱序条目：win(9/24 收官) 排在 pre_fail(10/21
+# 收官) 之后，last_win 仍应为 False、lose_streak=1。
+shuffled = [
+    dict(sym="SHUFUSDT", ts="2026-10-07T00:00:00+00:00", status="pre_fail",
+         entry_price=0.22, peak_gain=-0.2178, final_ts="2026-10-21T08:52:38+00:00"),
+    dict(sym="SHUFUSDT", ts="2026-08-31T04:00:00+00:00", status="win_strong",
+         entry_price=0.11, peak_gain=2.4238, final_ts="2026-09-13T00:00:00+00:00"),
+]
+hs = insights.coin_history(shuffled, "SHUFUSDT")
+check("coin_history: 乱序条目按 final_ts 判上轮（ARK bug 回归）",
+      hs["rounds"] == 2 and hs["wins"] == 1 and hs["best"] == 2.424
+      and hs["last_win"] is False and hs["lose_streak"] == 1)
+# 无 final_ts 的旧 fixture：退回 ts 排序，行为与旧版一致
+nofts = [
+    dict(sym="NTUSDT", ts="2026-09-01T00:00:00+00:00", status="win",
+         peak_gain=0.5),
+    dict(sym="NTUSDT", ts="2026-09-10T00:00:00+00:00", status="pre_fail",
+         peak_gain=-0.2),
+]
+hn = insights.coin_history(nofts, "NTUSDT")
+check("coin_history: 无 final_ts 时退回 ts 排序", hn["last_win"] is False)
+
 # ---------- 4. value_board ----------
 def cand(sym, potential=50, label="COILING", funding=None, oi=None,
          vol_tick=False, timing=None):
