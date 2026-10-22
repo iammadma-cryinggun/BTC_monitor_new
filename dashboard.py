@@ -1201,6 +1201,41 @@ class DashboardServer:
                     self.end_headers()
                     self.wfile.write(shell_html().encode("utf-8"))
                     return
+                if self.path == "/debug":
+                    # 2026-10-22 diagnostic: surface the monitor's in-memory
+                    # crash state + optionally force a synchronous mini-scan
+                    # (?run=1) to reproduce a scan crash on the live pod.
+                    mon = monitor
+                    if mon is None:
+                        self._reply_json(500, {"ok": False, "error": "no monitor wired"})
+                        return
+                    out = {
+                        "last_scan_error": getattr(mon, "_last_scan_error", None),
+                        "classify_errors": getattr(mon, "_classify_errors", []),
+                        "last_ranked_len": len(getattr(mon, "last_ranked", []) or []),
+                        "scan_summary": getattr(mon, "scan_summary", {}),
+                        "first_run": getattr(mon, "first_run", None),
+                        "universe_size": len(getattr(mon, "universe", []) or []),
+                        "last_scan_iso": getattr(mon, "last_scan_iso", None),
+                    }
+                    if "run=1" in qs and mon is not None:
+                        orig = mon.universe
+                        mon.universe = orig[:25]
+                        no_write = getattr(mon, "_debug_no_write", False)
+                        mon._debug_no_write = True
+                        try:
+                            mon.run_scan(emit=False)
+                            out["run"] = {"ok": True, "ranked": len(mon.last_ranked),
+                                          "scan_summary": mon.scan_summary}
+                        except Exception as _e:
+                            import traceback as _tb
+                            out["run"] = {"ok": False, "error": str(_e),
+                                          "traceback": _tb.format_exc()}
+                        finally:
+                            mon.universe = orig
+                            mon._debug_no_write = no_write
+                    self._reply_json(200, out)
+                    return
                 elif self.path == "/dashboard_data.json":
                     # Prefer the LIVE in-memory snapshot (same data that drives
                     # the Telegram digest). Fall back to the on-disk file only

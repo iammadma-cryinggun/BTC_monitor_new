@@ -581,6 +581,8 @@ class Monitor:
         self.last_ranked = []
         self.scan_summary = {}
         self.last_scan_iso = now_iso()
+        self._classify_errors = []      # 2026-10-22: per-coin classify failures
+        self._last_scan_error = None    # last full-scan exception traceback (debug)
         self.stop = False
         self.first_run = True
         # feed health for outage alerting (True = last round had data; the
@@ -700,6 +702,8 @@ class Monitor:
 
     # ---- web dashboard ----
     def write_dashboard(self):
+        if getattr(self, "_debug_no_write", False):
+            return
         try:
             signals = load_signals()
             meta = {
@@ -979,8 +983,21 @@ class Monitor:
             # matches the holding window); fall back to the 15m regime only
             # when the env fetch failed.
             _gate_regime = (self.btc_env or {}).get("r") or self.btc_regime
-            signals, cur_sigs = classify(sym, rec, prev,
-                                         btc_regime=_gate_regime, market=self.market)
+            # 2026-10-22 fix: this loop body was UNGUARDED — a single coin that
+            # makes classify()/state_out emission throw (e.g. prev=None on a
+            # fresh restart where STATE_PATH is empty) aborted the entire scan
+            # before scan_summary/last_ranked were set, leaving the dashboard
+            # frozen on the empty init state forever. Per-coin resilience now
+            # matches the score loop above.
+            try:
+                signals, cur_sigs = classify(sym, rec, prev,
+                                             btc_regime=_gate_regime, market=self.market)
+            except Exception as _ce:
+                print(f"[classify] {sym} skipped: {_ce}")
+                self._classify_errors.append(f"{sym}: {_ce}")
+                if len(self._classify_errors) > 20:
+                    self._classify_errors = self._classify_errors[-20:]
+                continue
             state_out[sym] = {
                 "label": rec["label"], "stage": rec["stage"], "score": rec["score"],
                 "vol_tick": rec.get("vol_tick"), "price": rec["price"],
@@ -1054,7 +1071,10 @@ class Monitor:
             print(f"[regime-log] skipped: {e}")
         # persist the fired-event ledger with the rest of the state
         state_out["_fired_events"] = fired
-        self.save_state(state_out)
+        try:
+            self.save_state(state_out)
+        except Exception as _se:
+            print(f"[state] save skipped: {_se}")
         if n_ok > 0 or not self.last_ranked:
             self.last_ranked = ranked
         # else: total data outage — keep the LAST GOOD watchlist on the
@@ -1416,8 +1436,11 @@ class Monitor:
                 # frozen data while the scanner was dead (2026-10-19).
                 try:
                     self.run_scan(emit=True)
+                    self._last_scan_error = None
                 except Exception as e:
                     import traceback
+                    tb = traceback.format_exc()
+                    self._last_scan_error = tb
                     print(f"[scan] CRASHED (monitor keeps running): {e}")
                     traceback.print_exc()
                 last_scan = now
