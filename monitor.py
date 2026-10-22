@@ -1182,6 +1182,15 @@ class Monitor:
                 self.notifier.send(
                     f"{SIG_EMOJI.get(lvl,'')} {_title} · {sym}",
                     msg, level=lvl)
+        # 模拟持仓（2026-10-22 用户指令）：纸面组合 1 万 USDT 按交易员纪律
+        # 自动跟单——只买「✅可入场」，-20% 止损 / +30% 减半保本 / 45 天超时。
+        # 状态存 data/paper.json，随 export/restore 闭环（sibling "paper" 键）
+        # 一起过部署清卷。
+        try:
+            import paper as _paper
+            _paper.on_scan(ranked)
+        except Exception as e:
+            print(f"[paper] skipped: {e}")
         self.write_dashboard()
         return ranked
 

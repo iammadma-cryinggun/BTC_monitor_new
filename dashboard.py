@@ -245,6 +245,14 @@ def build_snapshot(ranked, signals, meta=None):
         }
     except Exception:
         pass
+    # 模拟持仓（2026-10-22 用户指令）：纸面组合 1 万 USDT，交易员纪律自动
+    # 跟单（只买✅可入场 / -20% 止损 / +30% 减半保本 / 45 天超时）。
+    paper = None
+    try:
+        import paper as _paper
+        paper = _paper.snapshot(ranked)
+    except Exception:
+        pass
     return {
         "meta": {
             "generated": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
@@ -271,6 +279,7 @@ def build_snapshot(ranked, signals, meta=None):
         "ranked": ranked,
         "signals": signals or [],
         "ambush": ambush,
+        "paper": paper,
     }
 
 
@@ -583,6 +592,16 @@ th{color:var(--mut);font-weight:600;position:sticky;top:0;background:var(--card)
   <table><tr><th>币种</th><th>入场日(UTC)</th><th>入场价</th><th>结局</th><th>峰值</th></tr>
   <tbody id="finrows"></tbody></table>
 </div>
+<div class="card" id="papercard">
+  <div class="h2">💰 模拟持仓 · 纸面组合（虚拟本金 1万 USDT · 交易员纪律自动跟单）</div>
+  <div class="kpis" id="paperkpis"></div>
+  <div class="note" id="papernote"></div>
+  <table><tr><th>币种</th><th>入场日(UTC)</th><th>入场价</th><th>现价</th><th>浮动</th><th>净值占比</th><th>止损</th><th>目标</th><th>状态</th><th>依据</th></tr>
+  <tbody id="paperrows"></tbody></table>
+  <div class="h2" style="margin-top:14px">📒 模拟已平仓（最近 20 笔）</div>
+  <table><tr><th>币种</th><th>入场日</th><th>出场日</th><th>入场价</th><th>出场价</th><th>盈亏</th><th>原因</th></tr>
+  <tbody id="paperclosed"></tbody></table>
+</div>
 <div class="card" id="revcard">
   <div class="h2">📊 复盘 · 胜率验证（这套程序成不成功，数字说话）</div>
   <div class="kpis" id="revkpis"></div>
@@ -806,6 +825,53 @@ function render(d){
   } else if(amk){
     document.getElementById("ambcard").style.display="none";
   }
+  // 模拟持仓卡（2026-10-22 用户指令：纸面组合 1 万 USDT）
+  var pp=d.paper, pk=document.getElementById("paperkpis"),
+      pr=document.getElementById("paperrows"),
+      pc=document.getElementById("paperclosed"),
+      pnn=document.getElementById("papernote");
+  if(pk&&pp&&pp.initial){
+    var eq=pp.equity, ret=(typeof eq==="number"&&pp.initial)?(eq/pp.initial-1):null;
+    var stp=pp.stats||{};
+    pk.innerHTML =
+      '<div class="kpi">净值 <b>'+((typeof eq==="number")?eq.toFixed(2):"—")+'</b> USDT</div>'+
+      '<div class="kpi">现金 <b>'+((typeof pp.cash==="number")?pp.cash.toFixed(0):"—")+'</b></div>'+
+      '<div class="kpi">持仓 <b style="color:#f59e0b">'+(pp.n_pos||0)+'</b>/'+(pp.max_pos||5)+'</div>'+
+      '<div class="kpi">累计收益 <b style="color:'+((ret>=0)?"#22c55e":"#ef4444")+'">'+((ret!=null)?((ret>=0?"+":"")+(ret*100).toFixed(1)+"%"):"—")+'</b></div>'+
+      '<div class="kpi">已平仓 <b>'+(stp.n||0)+'</b> 笔 · 胜率 <b style="color:#22c55e">'+((stp.win_rate!=null)?(stp.win_rate*100).toFixed(0)+"%":"—")+'</b> · 均笔 <b>'+((stp.avg_pnl_pct!=null)?((stp.avg_pnl_pct>=0?"+":"")+(stp.avg_pnl_pct*100).toFixed(1)+"%"):"—")+'</b></div>';
+    var prows="";
+    (pp.positions||[]).forEach(function(p){
+      var fl=(typeof p.float_pct==="number")?((p.float_pct>=0?"+":"")+(p.float_pct*100).toFixed(1)+"%"):"—";
+      var fc=(p.float_pct==null)?"#9ca3af":((p.float_pct>=0)?"#22c55e":"#ef4444");
+      prows+='<tr><td class="ssym">'+(p.sym||"")+'</td>'+
+        '<td class="ts">'+(p.entry_ts||"").slice(0,10)+'</td>'+
+        '<td>'+fmtPrice(p.entry)+'</td>'+
+        '<td>'+fmtPrice(p.price)+'</td>'+
+        '<td class="sc" style="color:'+fc+'">'+fl+'</td>'+
+        '<td class="rs">'+((typeof p.weight==="number")?(p.weight*100).toFixed(1)+"%":"—")+'</td>'+
+        '<td style="color:#f87171">'+fmtPrice(p.stop)+'</td>'+
+        '<td style="color:#4ade80">'+fmtPrice(p.target)+'</td>'+
+        '<td><span class="tag" style="background:'+(p.half_taken?"#38bdf8":"#f59e0b")+'">'+(p.half_taken?"半仓·保本止损":"整仓")+'</span></td>'+
+        '<td class="rs">'+(p.ev_note||"")+'</td></tr>';
+    });
+    pr.innerHTML = prows || '<tr><td colspan="10" class="rs">（空仓等待——只买「✅可入场」，宁可错过不下单）</td></tr>';
+    var crows="";
+    (pp.closed||[]).forEach(function(c){
+      var g=(typeof c.pnl_pct==="number")?((c.pnl_pct>=0?"+":"")+(c.pnl_pct*100).toFixed(1)+"%"):"—";
+      var gc=(typeof c.pnl_pct==="number"&&c.pnl_pct>=0)?"#22c55e":"#ef4444";
+      crows+='<tr><td class="ssym">'+(c.sym||"")+'</td>'+
+        '<td class="ts">'+(c.entry_ts||"").slice(0,10)+'</td>'+
+        '<td class="ts">'+(c.exit_ts||"").slice(0,10)+'</td>'+
+        '<td>'+fmtPrice(c.entry)+'</td>'+
+        '<td>'+fmtPrice(c.exit)+'</td>'+
+        '<td class="sc" style="color:'+gc+'">'+g+'</td>'+
+        '<td class="rs">'+(c.reason||"")+'</td></tr>';
+    });
+    pc.innerHTML = crows || '<tr><td colspan="7" class="rs">（暂无平仓记录——组合刚起步）</td></tr>';
+    pnn.innerHTML = (pp.rules||"") + " 起始 "+((pp.started_at||"").slice(0,10))+" ｜ 状态更新 "+((pp.updated_at||"").slice(0,16).replace("T"," "))+" UTC";
+  } else if(pk){
+    document.getElementById("papercard").style.display="none";
+  }
   // review card（复盘 · 胜率验证）
   var rv=am&&am.review, rk2=document.getElementById("revkpis"), rn2=document.getElementById("revnote");
   if(rk2&&rv&&rv.evaluated){
@@ -930,6 +996,11 @@ class DashboardServer:
                     regime_rows = store.get("regime_log")
                     if not isinstance(regime_rows, list):
                         regime_rows = None
+                    # 2026-10-22 sibling key: paper-portfolio state (single JSON
+                    # blob, merge = newer updated_at wins)
+                    paper_state = store.get("paper")
+                    if not isinstance(paper_state, dict):
+                        paper_state = None
                     cur = os.path.join(data_dir, "ambush_track.json")
                     if os.path.exists(cur) and not force and not merge:
                         try:
@@ -979,6 +1050,7 @@ class DashboardServer:
                                                    "error": f"merge failed: {e}"})
                             return
                     store.pop("regime_log", None)  # tracker file stays pure
+                    store.pop("paper", None)       # ditto for the paper state
                     tmp = cur + ".tmp"
                     with open(tmp, "w", encoding="utf-8") as f:
                         json.dump(store, f, indent=2, ensure_ascii=False, default=str)
@@ -1011,8 +1083,42 @@ class DashboardServer:
                             print(f"[restore] regime_log merged: {n_regime} new rows")
                         except Exception as e:
                             print(f"[restore] regime_log merge failed: {e}")
+                    n_paper = 0
+                    if paper_state:
+                        try:
+                            pp = os.path.join(data_dir, "paper.json")
+                            cur_ps = None
+                            if os.path.exists(pp):
+                                try:
+                                    with open(pp, encoding="utf-8") as pf:
+                                        cur_ps = json.load(pf)
+                                except Exception:
+                                    cur_ps = None
+                            # paper 是单 JSON 状态：updated_at 较新者胜。
+                            # （fresh pod 的空状态 updated_at 更新但组合为空
+                            # 的情况由 >0 closed/positions 判断兜住：快照里
+                            # 有持仓/战绩而新盘是空盘时，快照优先。）
+                            snap_has_activity = bool(paper_state.get("positions")
+                                                     or paper_state.get("closed"))
+                            cur_is_blank = (not isinstance(cur_ps, dict)
+                                            or (not cur_ps.get("positions")
+                                                and not cur_ps.get("closed")))
+                            if (not isinstance(cur_ps, dict)
+                                    or (paper_state.get("updated_at") or "")
+                                    > (cur_ps.get("updated_at") or "")
+                                    or (snap_has_activity and cur_is_blank)):
+                                ptmp = pp + ".tmp"
+                                with open(ptmp, "w", encoding="utf-8") as pf:
+                                    json.dump(paper_state, pf,
+                                              ensure_ascii=False, default=str)
+                                os.replace(ptmp, pp)
+                                n_paper = 1
+                                print("[restore] paper state merged (newer wins)")
+                        except Exception as e:
+                            print(f"[restore] paper merge failed: {e}")
                     self._reply_json(200, {"ok": True, "restored": len(entries),
-                                           "regime_log": n_regime})
+                                           "regime_log": n_regime,
+                                           "paper": n_paper})
                 except Exception as e:
                     self._reply_json(400, {"ok": False, "error": str(e)})
 
@@ -1061,17 +1167,26 @@ class DashboardServer:
                         body = f.read()
                     if "with_regime=1" in qs:
                         # inject the regime log into the RESPONSE payload
-                        # only; the tracker file on disk is never touched
+                        # only; the tracker file on disk is never touched.
+                        # 2026-10-22: also inject the paper-portfolio state
+                        # (data/paper.json) under a "paper" key — same round
+                        # trip through POST /restore_track.
                         try:
                             obj = json.loads(body.decode("utf-8"))
                             rp = os.path.join(data_dir, "regime_log.json")
                             if os.path.exists(rp):
                                 with open(rp, encoding="utf-8") as rf:
                                     obj["regime_log"] = json.load(rf) or []
+                            pp = os.path.join(data_dir, "paper.json")
+                            if os.path.exists(pp):
+                                with open(pp, encoding="utf-8") as pf:
+                                    _ps = json.load(pf)
+                                if isinstance(_ps, dict):
+                                    obj["paper"] = _ps
                             body = json.dumps(obj, ensure_ascii=False,
                                               indent=2, default=str).encode("utf-8")
                         except Exception as e:
-                            print(f"[export] regime inject failed ({e}); raw tracker")
+                            print(f"[export] regime/paper inject failed ({e}); raw tracker")
                     self.send_response(200)
                     self.send_header("Content-Type", "application/json; charset=utf-8")
                     self.send_header("Content-Disposition",
