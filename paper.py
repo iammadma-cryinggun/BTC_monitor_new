@@ -23,7 +23,7 @@
 """
 import json
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 PAPER_PATH = os.path.join(HERE, "data", "paper.json")
@@ -179,20 +179,33 @@ def _is_eligible(r):
 
 
 def _candidates(ranked, tracker_entries):
-    """✅可入场 候选：埋伏★确认 + ⚡点位 + 未持有 + 连败<2。
-    优先级：上轮胜 > 新面孔 > 上轮败；同级按证据分（ev_pts→potential→score）。"""
+    """✅可入场 候选：埋伏★确认 + ⚡点位 + 未持有 + 纪律过滤。
+    优先级：上轮胜 > 新面孔 > 上轮败；同级按证据分（ev_pts→potential→score）。
+    返回 (out, avoided)：avoided 是「信号达标却被纪律拦下」的候选，供模拟持仓卡
+    的透明行展示（本轮回避的 ✅候选 + 原因）。
+    纪律过滤（2026-10-22 backfill 修复）：
+      - 真实连败≥2 → 确认输家，硬拦截；
+      - 全回填战绩（样本不足·低置信）→ 不按输家硬拦截，但按用户指令
+        「样本不足→跳过」，仅标注原因，不再伪称「连败N轮」错杀真涨币。"""
     import insights
     out = []
     for r in ranked or []:
         if not _is_eligible(r):
             continue
         out.append((r, r["price"]))
-    # 连败过滤（coin_history 现按 final_ts 排序，上轮判定可信）
+    avoided = []
     try:
         filtered = []
         for r, price in out:
             h = insights.coin_history(tracker_entries or [], r["sym"])
-            if (h.get("lose_streak") or 0) >= 2:
+            real_ls = h.get("lose_streak_real") or 0
+            all_bf = h.get("all_backfill")
+            rounds = h.get("rounds") or 0
+            if real_ls >= 2:
+                avoided.append((r["sym"], "连败≥2（真实战绩·确认输家）"))
+                continue
+            if all_bf and rounds > 0:
+                avoided.append((r["sym"], "样本不足·回填战绩不可信·待核实"))
                 continue
             r = dict(r)
             r["_hist"] = h
@@ -212,7 +225,7 @@ def _candidates(ranked, tracker_entries):
         return (tier, -pts)
 
     out.sort(key=sort_key)
-    return out
+    return out, avoided
 
 
 def on_scan(ranked, now=None, path=PAPER_PATH, tracker_entries=None):
@@ -237,7 +250,8 @@ def on_scan(ranked, now=None, path=PAPER_PATH, tracker_entries=None):
     last_elig = dict(state.get("last_elig") or {})
     held = {p["sym"] for p in state["positions"]}
     n_new = 0
-    for r, price in _candidates(ranked, tracker_entries):
+    cands, avoided = _candidates(ranked, tracker_entries)
+    for r, price in cands:
         if len(state["positions"]) >= MAX_POS or n_new >= MAX_NEW_PER_SCAN:
             break
         if r["sym"] in held:
@@ -274,6 +288,8 @@ def on_scan(ranked, now=None, path=PAPER_PATH, tracker_entries=None):
     for r in (ranked or []):
         last_elig[r["sym"]] = _is_eligible(r)
     state["last_elig"] = last_elig
+    # 透明行：本轮被纪律拦下的 ✅候选 + 原因（模拟持仓卡展示）
+    state["last_avoided"] = [{"sym": s, "reason": reason} for s, reason in avoided]
     state["updated_at"] = _now_iso(now)
     save(state, path)
     return state, events
@@ -329,4 +345,124 @@ def snapshot(ranked=None, path=PAPER_PATH):
         "started_at": state.get("started_at"),
         "updated_at": state.get("updated_at"),
         "rules": RULES_NOTE,
+        "avoided": state.get("last_avoided", []),
+    }
+
+
+# ----------------------------------------------------------------------------
+# 近 N 天回测（功能②，2026-10-23 用户指令：「回测近30天，看1万能变多少」）
+# 把 tracker 里已终结的回合按 final_ts 时间轴重放，套用与纸面组合一致的纪律：
+#   - 仓位 = 当时净值的 10%（与 live 单笔口径一致），最多 5 仓并发；
+#   - 纪律过滤：真实连败≥2 或 全回填(样本不足) 的回合跳过（与 _candidates 同口径）；
+#   - 每笔收益按纪律结算：赢/大赢 +30%（减半+保本，上限按 +30%）、弱 +10%、
+#     破位 -20%、miss/timeout 按实际峰值（通常很小）。
+# 说明：回填回合缺精确 entry/exit 窗口，并发按 final_ts 相邻结算近似；这是
+# 「纪律系统若严格执行，近 N 天净值会怎么走」的保守估计，非精确逐笔复刻。
+# ----------------------------------------------------------------------------
+FINAL_STATUSES = ("win_strong", "win", "weak", "miss", "pre_fail", "timeout")
+
+
+def _disc_outcome(status, peak_gain):
+    """纪律口径下，一个已终结回合给到的收益率（与 live 离场同源）。"""
+    if status in ("win_strong", "win"):
+        return TARGET_PCT                 # +30% 达标减半·尾仓保本，收益按 +30% 记
+    if status == "weak":
+        return 0.10
+    if status == "pre_fail":
+        return -STOP_PCT                 # 启动前破位 -20%
+    pg = peak_gain if isinstance(peak_gain, (int, float)) else 0.0
+    return pg                            # miss/timeout：按实际峰值（通常很小）
+
+
+def backtest(entries, days=30, initial=INITIAL_CAPITAL, now=None):
+    """近 N 天信号重放，返回净值曲线 + 统计。"""
+    import insights
+    now = now or datetime.now(timezone.utc)
+    since = now - timedelta(days=days)
+
+    def _k(e):
+        return e.get("final_ts") or e.get("ts") or ""
+
+    fins = [e for e in (entries or [])
+            if e.get("status") in FINAL_STATUSES and _k(e)]
+    # 时间窗过滤
+    fins = [e for e in fins if _k(e) >= since.isoformat()]
+    if not fins:
+        return {"days": days, "initial": round(initial, 2),
+                "final_equity": round(initial, 2), "total_return": 0.0,
+                "n_trades": 0, "n_wins": 0, "win_rate": None,
+                "trades": [], "note": "近 N 天无已终结回合可回放"}
+    fins.sort(key=_k)
+    # 按币建时间序，供纪律过滤用「到该回合为止」的连败
+    by_coin = {}
+    for e in fins:
+        by_coin.setdefault(e.get("sym"), []).append(e)
+    for s in by_coin:
+        by_coin[s].sort(key=_k)
+
+    equity = float(initial)
+    total_invested = 0.0
+    open_pos = []          # {sym, notional, close_ts, ret}
+    trades = []
+    for ep in fins:
+        close_ts = _k(ep)
+        # 1) 先结算已到期的仓位（close_ts 严格早于本回合）
+        still_open = []
+        for p in open_pos:
+            if p["close_ts"] < close_ts:
+                profit = p["notional"] * p["ret"]
+                equity += profit
+                total_invested -= p["notional"]
+                trades.append({"sym": p["sym"], "ret": round(p["ret"], 4),
+                               "notional": round(p["notional"], 2),
+                               "profit": round(profit, 2),
+                               "ts": p["close_ts"][:10]})
+            else:
+                still_open.append(p)
+        open_pos = still_open
+        # 2) 纪律过滤（与 _candidates 同口径）：到本回合之前该币的战绩
+        sym = ep.get("sym")
+        prior = by_coin.get(sym, [])
+        prior_hist = [e for e in prior if _k(e) < close_ts]
+        if prior_hist:
+            h = insights.coin_history(prior_hist, sym)
+            real_ls = h.get("lose_streak_real") or 0
+            all_bf = h.get("all_backfill")
+            if real_ls >= 2 or (all_bf and (h.get("rounds") or 0) > 0):
+                trades.append({"sym": sym, "skipped": "纪律过滤(连败/样本不足)"})
+                continue
+        if len(open_pos) >= MAX_POS:
+            trades.append({"sym": sym, "skipped": "满仓"})
+            continue
+        # 3) 开仓：size = 10% 净值（不超过可用）
+        size = equity * POS_PCT
+        if total_invested + size > equity:
+            size = max(0.0, equity - total_invested)
+        if size <= 0:
+            continue
+        ret = _disc_outcome(ep.get("status"), ep.get("peak_gain"))
+        open_pos.append({"sym": sym, "notional": size,
+                         "close_ts": close_ts, "ret": ret})
+        total_invested += size
+    # 收尾：结算剩余仓位
+    for p in open_pos:
+        profit = p["notional"] * p["ret"]
+        equity += profit
+        trades.append({"sym": p["sym"], "ret": round(p["ret"], 4),
+                       "notional": round(p["notional"], 2),
+                       "profit": round(profit, 2),
+                       "ts": p["close_ts"][:10]})
+
+    n = len([t for t in trades if "ret" in t])
+    wins = [t for t in trades if t.get("ret", 0) >= 0.10]
+    ret_pct = (equity / initial - 1) if initial else 0.0
+    return {
+        "days": days,
+        "initial": round(initial, 2),
+        "final_equity": round(equity, 2),
+        "total_return": round(ret_pct, 4),
+        "n_trades": n,
+        "n_wins": len(wins),
+        "win_rate": round(len(wins) / n, 3) if n else None,
+        "trades": trades,
     }

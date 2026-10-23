@@ -601,6 +601,10 @@ th{color:var(--mut);font-weight:600;position:sticky;top:0;background:var(--card)
   <div class="h2" style="margin-top:14px">📒 模拟已平仓（最近 20 笔）</div>
   <table><tr><th>币种</th><th>入场日</th><th>出场日</th><th>入场价</th><th>出场价</th><th>盈亏</th><th>原因</th></tr>
   <tbody id="paperclosed"></tbody></table>
+  <div class="h2" style="margin-top:14px">🚫 本轮回避的 ✅候选 + 原因（纪律过滤透明行）</div>
+  <table><tr><th>币种</th><th>回避原因</th></tr>
+  <tbody id="paperavoided"></tbody></table>
+  <div style="margin-top:12px"><a href="/paper_backtest" target="_blank" style="display:inline-block;background:#161a22;border:1px solid #1f2937;color:#9ca3af;border-radius:8px;padding:7px 14px;font-size:12px;text-decoration:none;cursor:pointer">📊 回测近30天（纸面纪律重放）</a></div>
 </div>
 <div class="card" id="revcard">
   <div class="h2">📊 复盘 · 胜率验证（这套程序成不成功，数字说话）</div>
@@ -868,6 +872,14 @@ function render(d){
         '<td class="rs">'+(c.reason||"")+'</td></tr>';
     });
     pc.innerHTML = crows || '<tr><td colspan="7" class="rs">（暂无平仓记录——组合刚起步）</td></tr>';
+    // 透明行：本轮被纪律拦下的 ✅候选 + 原因
+    var pa=document.getElementById("paperavoided");
+    if(pa&&pp){
+      var ar=(pp.avoided||[]);
+      pa.innerHTML = ar.length ? ar.map(function(a){
+        return '<tr><td class="ssym">'+(a.sym||"")+'</td><td class="rs">'+(a.reason||"")+'</td></tr>';
+      }).join("") : '<tr><td colspan="2" class="rs">（本轮无被纪律过滤的 ✅候选）</td></tr>';
+    }
     pnn.innerHTML = (pp.rules||"") + " 起始 "+((pp.started_at||"").slice(0,10))+" ｜ 状态更新 "+((pp.updated_at||"").slice(0,16).replace("T"," "))+" UTC";
   } else if(pk){
     document.getElementById("papercard").style.display="none";
@@ -913,6 +925,70 @@ tick(); load(); setInterval(tick,1000); setInterval(load,30000);
 </script>
 </body></html>"""
     return shell.replace("__BUILD_SHA__", BUILD_SHA)
+
+
+def paper_backtest_html(res, days=30):
+    """Full HTML page for the 近 N 天 paper-discipline backtest (功能②)."""
+    eq = res.get("final_equity")
+    init = res.get("initial")
+    tr = res.get("total_return")
+    n = res.get("n_trades", 0)
+    nw = res.get("n_wins", 0)
+    wr = res.get("win_rate")
+    trades = res.get("trades", [])
+    tr_s = (f"{tr*100:+.1f}%" if isinstance(tr, (int, float)) else "—")
+    wr_s = (f"{wr*100:.0f}%" if isinstance(wr, (int, float)) else "—")
+    def fp(x):
+        try:
+            return f"{x:.5g}"
+        except Exception:
+            return str(x)
+    rows = ""
+    for t in trades:
+        if "skipped" in t:
+            rows += (f'<tr><td class="ssym">{t.get("sym","")}</td>'
+                     f'<td colspan="4" class="rs">跳过：{t["skipped"]}</td></tr>')
+            continue
+        ret = t.get("ret")
+        rcol = "#22c55e" if (ret or 0) >= 0 else "#ef4444"
+        rows += (f'<tr><td class="ssym">{t.get("sym","")}</td>'
+                 f'<td>{t.get("ts","")}</td>'
+                 f'<td>{fp(t.get("notional"))}</td>'
+                 f'<td class="sc" style="color:{rcol}">{ret*100:+.1f}%</td>'
+                 f'<td class="sc" style="color:{rcol}">{fp(t.get("profit"))}</td></tr>')
+    if not rows:
+        rows = '<tr><td colspan="5" class="rs">（无回放记录）</td></tr>'
+    note = res.get("note", "")
+    noteline = (f'<div class="note" style="color:#fbbf24">{note}</div>') if note else ""
+    return f"""<!doctype html><html lang="zh"><head><meta charset="utf-8">
+<title>模拟持仓 · 近{days}天回测</title>
+<style>
+:root{{--bg:#0f1115;--card:#161a22;--bd:#1f2937;--tx:#e5e7eb;--mut:#9ca3af}}
+body{{font-family:-apple-system,'Segoe UI',Roboto,sans-serif;background:var(--bg);color:var(--tx);margin:0;padding:20px}}
+h1{{font-size:20px;margin:0 0 12px}} .card{{background:var(--card);border:1px solid var(--bd);border-radius:10px;padding:14px 16px;margin-bottom:16px}}
+.kpis{{display:flex;gap:10px;flex-wrap:wrap}} .kpi{{background:var(--bg);border:1px solid var(--bd);border-radius:8px;padding:10px 14px;font-size:13px;color:var(--mut)}}
+.kpi b{{display:block;font-size:20px;color:#fff;margin-top:2px}}
+table{{border-collapse:collapse;width:100%;font-size:13px}} th,td{{padding:7px 9px;border-bottom:1px solid var(--bd);text-align:left}}
+th{{color:var(--mut);font-weight:600}} .ssym{{color:#fff;font-weight:600}} .rs{{color:#cbd5e1}} .sc{{font-weight:700}}
+.note{{color:var(--mut);font-size:11px;margin-top:8px}}
+</style></head><body>
+<h1>💰 模拟持仓 · 近 {days} 天回测（纸面纪律重放）</h1>
+<div class="card"><div class="kpis">
+  <div class="kpi">初始本金 <b>{init}</b> USDT</div>
+  <div class="kpi">期末净值 <b>{eq}</b> USDT</div>
+  <div class="kpi">累计收益 <b style="color:{'#22c55e' if (tr or 0)>=0 else '#ef4444'}">{tr_s}</b></div>
+  <div class="kpi">回放笔数 <b>{n}</b></div>
+  <div class="kpi">胜率 <b style="color:#22c55e">{wr_s}</b>（盈利笔 {nw}）</div>
+</div>
+<div class="note">口径：仓位=当时净值10%·最多5仓并发；纪律过滤（真实连败≥2/全回填样本不足）跳过；收益按纪律结算（赢+30%/弱+10%/破位-20%/超时按实际峰值）。回填回合缺精确窗口，并发按 final_ts 相邻近似，属保守估计。看板构建版本: {BUILD_SHA}</div>
+{noteline}
+</div>
+<div class="card"><div class="h2" style="font-size:15px;margin:0 0 10px;color:#fff">📜 回放清单（每笔结算）</div>
+<table><tr><th>币种</th><th>结算日</th><th>仓位(USDT)</th><th>收益</th><th>盈亏(USDT)</th></tr>
+<tbody>{rows}</tbody></table></div>
+<div class="note"><a href="/" style="color:#38bdf8">← 返回实时看板</a></div>
+</body></html>"""
+
 
 # ----------------------------------------------------------------------------
 class DashboardServer:
@@ -1236,6 +1312,29 @@ class DashboardServer:
                             mon._debug_no_write = no_write
                     self._reply_json(200, out)
                     return
+                if self.path == "/paper_backtest":
+                    # 功能②（2026-10-23）：近 N 天纸面纪律回放结果页
+                    try:
+                        import paper as _pp
+                        import ambush_tracker as _at
+                        entries = _at.load().get("entries", [])
+                        days = 30
+                        if "days=" in qs:
+                            try:
+                                days = int(qs.split("days=", 1)[1].split("&", 1)[0])
+                            except Exception:
+                                days = 30
+                        res = _pp.backtest(entries, days=days)
+                        body = paper_backtest_html(res, days).encode("utf-8")
+                        self.send_response(200)
+                        self.send_header("Content-Type", "text/html; charset=utf-8")
+                        self.send_header("Content-Length", str(len(body)))
+                        self.end_headers()
+                        self.wfile.write(body)
+                        return
+                    except Exception as e:
+                        self._reply_json(500, {"ok": False, "error": str(e)})
+                        return
                 elif self.path == "/dashboard_data.json":
                     # Prefer the LIVE in-memory snapshot (same data that drives
                     # the Telegram digest). Fall back to the on-disk file only

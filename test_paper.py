@@ -176,6 +176,67 @@ check("build_snapshot: paper key present",
 check("build_snapshot: paper equity is a number",
       isinstance(ds["paper"].get("equity"), (int, float)))
 
+# ---------- 14. backfill-aware 连败（2026-10-23 AKE 修复）----------
+# 全回填的输家历史：不按「确认输家」硬拦截，归为样本不足→跳过（透明行标注）
+bf_hist = [
+    dict(sym="AKEUSDT", ts="2026-10-21T00:00:00+00:00", status="pre_fail",
+         peak_gain=-0.204, final_ts="2026-10-21T08:00:00+00:00", source="backfill"),
+    dict(sym="AKEUSDT", ts="2026-10-22T00:00:00+00:00", status="pre_fail",
+         peak_gain=-0.213, final_ts="2026-10-22T08:00:00+00:00", source="backfill"),
+]
+cands_bf, avoided_bf = paper._candidates([cand("AKEUSDT", 1.0)], bf_hist)
+check("backfill: AKE 全回填输家未被硬拦截为候选（归样本不足跳过）",
+      len(cands_bf) == 0)
+check("backfill: AKE 进入回避透明行·原因标注回填不可信",
+      any(a[0] == "AKEUSDT" and "回填" in a[1] for a in avoided_bf))
+# 真实输家历史：仍硬拦截（确认输家）
+real_hist = [
+    dict(sym="FFFUSDT", ts="2026-09-01T00:00:00+00:00", status="pre_fail",
+         peak_gain=-0.2, final_ts="2026-09-20T00:00:00+00:00", source="live"),
+    dict(sym="FFFUSDT", ts="2026-09-25T00:00:00+00:00", status="pre_fail",
+         peak_gain=-0.2, final_ts="2026-10-10T00:00:00+00:00", source="live"),
+]
+cands_r, avoided_r = paper._candidates([cand("FFFUSDT", 1.0)], real_hist)
+check("backfill: 真实连败≥2 仍硬拦截", len(cands_r) == 0)
+check("backfill: 真实输家原因标注确认输家",
+      any(a[0] == "FFFUSDT" and "确认输家" in a[1] for a in avoided_r))
+# on_scan 应把回避候选写进 last_avoided（透明行数据源）
+st_bf, _ = scan([cand("AKEUSDT", 1.0)], timedelta(days=46, hours=10),
+                tracker_entries=bf_hist)
+check("backfill: on_scan 记录 last_avoided 透明行",
+      any(a.get("sym") == "AKEUSDT" for a in (st_bf.get("last_avoided") or [])))
+
+# ---------- 15. 近30天回测（功能②）----------
+bt_entries = [
+    dict(sym="W1USDT", status="win", peak_gain=0.5,
+         ts="2026-10-10T00:00:00+00:00", final_ts="2026-10-15T00:00:00+00:00", source="live"),
+    dict(sym="W2USDT", status="win", peak_gain=0.5,
+         ts="2026-10-12T00:00:00+00:00", final_ts="2026-10-17T00:00:00+00:00", source="live"),
+    dict(sym="W3USDT", status="win", peak_gain=0.5,
+         ts="2026-10-14T00:00:00+00:00", final_ts="2026-10-19T00:00:00+00:00", source="live"),
+]
+bt = paper.backtest(bt_entries, days=30, initial=10000.0,
+                    now=datetime(2026, 10, 23, tzinfo=timezone.utc))
+check("backtest: 3 笔全赢 → 3 笔交易", bt["n_trades"] == 3)
+check("backtest: 胜率 100%", bt["win_rate"] == 1.0)
+exp_eq = round(10000 * (1.03 ** 3), 2)
+check("backtest: 期末净值 = 10000*1.03^3", abs(bt["final_equity"] - exp_eq) < 0.5)
+# 纪律过滤：真实连败≥2 后的回合被跳过（亏损回合仍照常结算）
+bt_skip = [
+    dict(sym="L1USDT", status="pre_fail", peak_gain=-0.2,
+         ts="2026-10-01T00:00:00+00:00", final_ts="2026-10-05T00:00:00+00:00", source="live"),
+    dict(sym="L1USDT", status="pre_fail", peak_gain=-0.2,
+         ts="2026-10-06T00:00:00+00:00", final_ts="2026-10-10T00:00:00+00:00", source="live"),
+    dict(sym="L1USDT", status="win", peak_gain=0.5,
+         ts="2026-10-12T00:00:00+00:00", final_ts="2026-10-18T00:00:00+00:00", source="live"),
+]
+bt2 = paper.backtest(bt_skip, days=30, initial=10000.0,
+                    now=datetime(2026, 10, 23, tzinfo=timezone.utc))
+check("backtest: 连败后的回合被纪律跳过（仅结算亏损回合）", bt2["n_trades"] == 2)
+skipped = [t for t in bt2["trades"] if t.get("skipped")]
+check("backtest: 存在被纪律过滤跳过的回合", any("纪律过滤" in (t.get("skipped") or "") for t in skipped))
+check("backtest: 跳过赢家回合·亏损回合照常结算", abs(bt2["final_equity"] - 9604) < 1)
+
 fails = [n for n, ok in checks if not ok]
 print()
 print("ALL PAPER CHECKS PASSED" if not fails else "FAILURES: %s" % fails)

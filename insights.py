@@ -164,9 +164,39 @@ def coin_history(entries, sym):
                 if (e.get("peak_gain") or 0) >= WIN:
                     break
                 lose_streak += 1
+    # 2026-10-22 增补：回填（backfill）战绩来自缓存 K 线重放，是有偏样本
+    # （ambush_tracker 文档自注 curated/biased sample）。AKE 案例暴露：回填把
+    # 一个真在涨的币写成"连败两轮输家"，与实时涨幅榜打架。为让纪律诚实，
+    # 额外给出「只吃真实 tracked 回合」的口径——
+    #   lose_streak_real : 仅 source != "backfill" 的 finale 计连败
+    #   all_backfill     : 所有战绩都是回填（真实样本为 0）
+    #   confidence       : high=纯真实 / low=纯回填 / mixed=混合
+    # 纸面组合硬拦截与面板 ev_note 据此降级，避免假阴性错杀真涨币。
+    real_fins = [e for e in fins
+                 if e.get("source") != "backfill"]  # 缺失 source 视为真实
+    real_fins_s = sorted(real_fins,
+                         key=lambda e: e.get("final_ts") or e.get("ts") or "")
+    last_win_real = None
+    lose_streak_real = 0
+    if real_fins_s:
+        last_win_real = (real_fins_s[-1].get("peak_gain") or 0) >= WIN
+        if not last_win_real:
+            for e in reversed(real_fins_s):
+                if (e.get("peak_gain") or 0) >= WIN:
+                    break
+                lose_streak_real += 1
+    n_real = len(real_fins)
+    n_backfill = len(fins) - n_real
+    all_backfill = (len(fins) > 0 and n_real == 0)
+    confidence = ("high" if (n_real > 0 and n_backfill == 0)
+                  else "low" if (n_real == 0 and n_backfill > 0)
+                  else "mixed")
     return {"rounds": len(fins), "wins": len(wins),
             "best": round(max(peaks), 3) if peaks else None,
-            "last_win": last_win, "lose_streak": lose_streak}
+            "last_win": last_win, "lose_streak": lose_streak,
+            "lose_streak_real": lose_streak_real,
+            "n_real": n_real, "n_backfill": n_backfill,
+            "all_backfill": all_backfill, "confidence": confidence}
 
 
 # ----------------------------------------------------------------------------
@@ -329,12 +359,18 @@ def value_board(ranked, entries=None, top=5):
                            f"峰值达 +30%（最佳 {_fmt_pct(h['best'])}），上一轮刚赢——"
                            f"历史 70% 的此类重入下一轮再达标，同币复利是历史最大赢面")
         elif h.get("rounds"):
-            ls = h.get("lose_streak") or 1
-            pts -= (25.0 if ls >= 2 else 15.0)
-            base_rate = "12%" if ls < 2 else "5%"
-            reasons.append(f"第{h['rounds']+1}轮重入：连败 {ls} 轮"
-                           f"（最佳 {_fmt_pct(h['best'])}）——历史复盘：此类重入"
-                           f"下一轮仅 {base_rate} 达标，已降权，建议回避")
+            if h.get("all_backfill"):
+                # 回填战绩来自缓存 K 线重放，有偏未实盘验证：不按输家降权，
+                # 只标注低置信，避免把真在涨的币错杀成「确认输家」。
+                reasons.append(f"第{h['rounds']+1}轮重入：战绩全为回填样本（有偏、未实盘验证），"
+                               f"置信度低·待核实，建议只作观察、不据此下注")
+            else:
+                ls = h.get("lose_streak") or 1
+                pts -= (25.0 if ls >= 2 else 15.0)
+                base_rate = "12%" if ls < 2 else "5%"
+                reasons.append(f"第{h['rounds']+1}轮重入：连败 {ls} 轮"
+                               f"（最佳 {_fmt_pct(h['best'])}）——历史复盘：此类重入"
+                               f"下一轮仅 {base_rate} 达标，已降权，建议回避")
         fd, oc = r.get("funding"), r.get("oi_chg_24h")
         if (isinstance(fd, (int, float)) and fd < 0
                 and isinstance(oc, (int, float)) and oc > 0.10):
@@ -358,7 +394,10 @@ def value_board(ranked, entries=None, top=5):
         if h.get("last_win"):
             note_parts.append(f"{h['wins']}/{h['rounds']}轮胜·上轮胜·最佳{_fmt_pct(h['best'])}")
         elif h.get("rounds"):
-            note_parts.append(f"⚠️连败{h.get('lose_streak') or 1}轮·最佳{_fmt_pct(h['best'])}")
+            if h.get("all_backfill"):
+                note_parts.append("回补缴全·低置信")
+            else:
+                note_parts.append(f"⚠️连败{h.get('lose_streak') or 1}轮·最佳{_fmt_pct(h['best'])}")
         else:
             note_parts.append("新面孔·无战绩")
         if any("逼空燃料" in s for s in reasons):

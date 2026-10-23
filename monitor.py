@@ -1208,7 +1208,35 @@ class Monitor:
         # 一起过部署清卷。
         try:
             import paper as _paper
-            _paper.on_scan(ranked)
+            _paper_state, _paper_events = _paper.on_scan(ranked)
+            # 功能①（2026-10-23）：开新仓 Telegram 推送（含入场价/止损/目标/
+            # 依据/权重）。边沿触发（last_elig）保证重启不重复推送已持仓币；
+            # enter 事件只在真正新开仓时产生。
+            _entered = [e for e in (_paper_events or []) if e[0] == "enter"]
+            if _entered:
+                _prices = {r.get("sym"): r.get("price")
+                           for r in (ranked or [])
+                           if isinstance(r.get("price"), (int, float))}
+                _eq = _paper._equity(_paper_state, _prices)
+                _pos = {p["sym"]: p for p in (_paper_state.get("positions") or [])}
+                for _e in _entered:
+                    _sym = _e[1]
+                    _p = _pos.get(_sym)
+                    if not _p:
+                        continue
+                    _budget = _e[2]
+                    _w = (_p["qty"] * (_p.get("price") or _p["entry"]) / _eq) if _eq else None
+                    _msg = (f"🟢 模拟开仓：{_sym}\n"
+                            f"入场价：{_p['entry']}\n"
+                            f"止损价：{_p['stop']}（-20%）\n"
+                            f"目标价：{_p['target']}（+30% 减半·尾仓保本）\n"
+                            f"仓位：{_budget:.0f} USDT"
+                            + (f"（净值占比 {_w*100:.1f}%）" if _w else "")
+                            + f"\n依据：{_p.get('ev_note') or '—'}")
+                    try:
+                        self.notifier.send(f"📈 模拟开仓 · {_sym}", _msg)
+                    except Exception as _ex:
+                        print(f"[paper] push failed: {_ex}")
         except Exception as e:
             print(f"[paper] skipped: {e}")
         self.write_dashboard()
