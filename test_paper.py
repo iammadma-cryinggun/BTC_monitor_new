@@ -246,6 +246,27 @@ check("backtest: 真实连败不再触发纪律过滤跳过", len(skipped) == 0)
 # 两笔 -20% 止损 + 一笔 +30% 赢 = 10000*0.98*0.98*1.03 = 9892.12（每笔按 10% 当前权益复利）
 check("backtest: 全回放净值 = 10000*0.98^2*1.03", abs(bt2["final_equity"] - 9892.12) < 1)
 
+# ---------- 16. 支撑区位 / 蛰伏深度 排序偏好 (2026-10-23) ----------
+def cand2(sym, zone, base_qual=0.8, wake_q=0.6):
+    return dict(sym=sym, label="COILING", vol_tick=True,
+                vt_streak=2, vt_confirmed=True, flat_run=10, range_w=0.08,
+                price=1.0, score=80, potential=80, ev_pts=80,
+                timing={"ready": True}, zone=zone,
+                base_qual=base_qual, wake_q=wake_q)
+
+# 同证据分下，支撑区应排在压力区之前（用户：最好在支撑开单，压力位做多危险）
+z_cands, _ = paper._candidates(
+    [cand2("RESUSDT", "resistance"), cand2("SUPUSDT", "support")], [])
+z_syms = [r["sym"] for r, _ in z_cands]
+check("support-zone: 支撑区排在压力区之前", z_syms.index("SUPUSDT") < z_syms.index("RESUSDT"))
+
+# 同区位下，蛰伏深度(base_qual)/量能质量(wake_q) 高的排在低的之前
+bq_cands, _ = paper._candidates(
+    [cand2("LOWQ", "mid", base_qual=0.2, wake_q=0.1),
+     cand2("HIGHQ", "mid", base_qual=0.95, wake_q=0.8)], [])
+bq_syms = [r["sym"] for r, _ in bq_cands]
+check("hibernation: 蛰伏深度高的排在低的之前", bq_syms.index("HIGHQ") < bq_syms.index("LOWQ"))
+
 fails = [n for n, ok in checks if not ok]
 print()
 print("ALL PAPER CHECKS PASSED" if not fails else "FAILURES: %s" % fails)

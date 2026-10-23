@@ -180,7 +180,9 @@ def _is_eligible(r):
 
 def _candidates(ranked, tracker_entries):
     """✅可入场 候选：埋伏★确认 + ⚡点位 + 未持有 + 纪律过滤。
-    优先级：上轮胜 > 新面孔 > 上轮败；同级按证据分（ev_pts→potential→score）。
+    优先级：上轮胜 > 新面孔 > 上轮败；同级按证据分（ev_pts→potential→score），
+    再加 支撑区位/蛰伏深度/量能质量 升权（2026-10-23：用户偏好在支撑开单、
+    压力位做多危险，且蛰伏数月才量能抬头才是真·埋伏目标）。仅升权不剔除。
     返回 (out, avoided)：avoided 是「信号达标却被纪律拦下」的候选，供模拟持仓卡
     的透明行展示（本轮回避的 ✅候选 + 原因）。
     纪律过滤（2026-10-22 backfill 修复 + 2026-10-23 软惩罚）：
@@ -229,7 +231,16 @@ def _candidates(ranked, tracker_entries):
             pts = r.get("potential") if isinstance(r.get("potential"), (int, float)) else (r.get("score") or 0)
         # 软惩罚：真实连败≥2 每轮 -10 优先级（仅降权，不剔除）
         pen = (r.get("_ls_penalty") or 0) * 10
-        return (tier, -(pts - pen))
+        # 2026-10-23 支持位偏好 + 蛰伏深度 + 量能质量：在支撑区横盘、蛰伏久、
+        # 量能真实抬头的币优先排序（用户意图：最好在支撑开单，压力位做多危险；
+        # 很多币蛰伏数月才量能抬头）。仅升权不剔除——专业判断而非迎合。
+        bq = r.get("base_qual") or 0
+        wq = r.get("wake_q") or 0
+        zn = r.get("zone")
+        zb = 12 if zn == "support" else (-8 if zn == "resistance" else 0)
+        boost = bq * 15 + wq * 10 + zb
+        # 升权：把 boost 加入有效分，越高越靠前（注意符号：键越小越靠前）
+        return (tier, -((pts - pen) + boost))
 
     out.sort(key=sort_key)
     return out, avoided

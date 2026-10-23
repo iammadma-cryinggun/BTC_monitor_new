@@ -473,6 +473,16 @@ def potential_of(rec):
         p += 15.0 - (pv - 0.05) / 0.40 * 13.0
     else:
         p += 2.0                                       # already stretched
+    # 蛰伏深度：长期低波动横盘 = 蓄能越足（真·埋伏目标，潜在空间更大）
+    bq = rec.get("base_qual")
+    if isinstance(bq, (int, float)):
+        p += min(12.0, bq * 12.0)
+    # 支撑区位偏好：在支撑区横盘比在压力区横盘，潜在更稳（长多更易成）
+    z = rec.get("zone")
+    if z == "support":
+        p += 6.0
+    elif z == "resistance":
+        p -= 4.0
     if isinstance(tbr, (int, float)) and tbr >= 0.55:
         p += 6.0
     if isinstance(cvd, (int, float)) and cvd > 0.0:
@@ -508,10 +518,18 @@ def score_coin(sym, market="spot", force_fetch=False):
             flat_run += 1
         else:
             break
-    # volume tick: recent 3-bar avg vs prior ~24-bar baseline — is volume waking up?
-    vol_recent = float(np.mean(volr[-3:])) if n >= 3 else float(volr[-1])
-    vol_base = float(np.mean(volr[-27:-3])) if n >= 30 else float(np.mean(volr[:max(1, n-3)]))
-    vol_tick = (vol_recent > 1.15) and (vol_recent > vol_base * 1.15)
+    # volume tick: recent volume vs prior baseline — is volume genuinely waking up?
+    # Use a 5-bar window for a "sustained" lift and a 3-bar window for a "sharp"
+    # spike; require BOTH so a single-bar fluke (often a crash bar) can't
+    # masquerade as a 量能抬头. wake_q (0..1) grades how strong+sustained the
+    # lift is for ranking, and is zeroed if the tbuy gate below rejects the
+    # volume as seller-driven.
+    vol_recent3 = float(np.mean(volr[-3:])) if n >= 3 else float(volr[-1])
+    vol_recent5 = float(np.mean(volr[-5:])) if n >= 5 else vol_recent3
+    vol_base = float(np.mean(volr[-27:-5])) if n >= 30 else float(np.mean(volr[:max(1, n-3)]))
+    vol_tick = (vol_recent3 > vol_base * 1.15) and (vol_recent5 > vol_base * 1.05)
+    wake_ratio = (vol_recent5 / vol_base) if vol_base > 0 else 1.0
+    wake_q = max(0.0, min(1.0, wake_ratio - 1.0))
     # tightness of last 15 bars
     hi = float(np.max(df["high"].values[-15:]))
     lo = float(np.min(df["low"].values[-15:]))
@@ -558,10 +576,47 @@ def score_coin(sym, market="spot", force_fetch=False):
     # ratio None -> gate skipped (backward compat with replay fixtures).
     if vol_tick and tbuy_ratio is not None and tbuy_ratio < 0.50:
         vol_tick = False
+        wake_q = 0.0
 
     # 20-day (120 4h bars) swing ratio — gates out stablecoins / tokenized stocks / dead coins
     win = close[-120:]
     swing = (float(np.max(win)) / float(np.min(win))) if len(win) and np.min(win) > 0 else 1.0
+
+    # --- 蛰伏深度 (base_qual) + 支撑区位 (zone) 指标 (2026-10-23) ---
+    # 用户原始意图：「很多币蛰伏了几个月才有量能抬头」+「最好在支撑开单，
+    # 压力位做多危险」。旧代码只有 flat_run（近 15 根局部平整），无法度量
+    # 「蛰伏了几个月」，也没有「价在 20 日区间的什么位置」的概念。
+    # 实现：用滚动 20 根实现的波动率(对数收益 std)度量「安静度」——一根币
+    # 自己的波动率落在自身历史 25 分位以下即视为「安静/蛰伏」。尾段连续安静
+    # 根数 + 近 20 日安静占比 合成 base_qual(0..1)：连续安静越久、占比越高
+    # = 真正的多周蛰伏（蓄能越足）。zone = 现价在 20 日区间的位置：下 35% =
+    # 支撑区(好)，上 35% = 压力区(危险，软惩罚)，中间 = mid。
+    W = 20
+    logret = np.diff(np.log(close.astype(float)))
+    rv = np.zeros(n)
+    for i in range(W, n):
+        rv[i] = float(np.std(logret[i - W:i]))
+    rvv = rv[rv > 0]
+    quiet_thr = float(np.percentile(rvv, 25)) if rvv.size else 0.0
+    quiet = rv < quiet_thr
+    # 尾段连续安静根数：当前是否"正在横盘"（flat_run 已另有衡量，这里作辅助）
+    quiet_run = 0
+    for j in range(n - 1, -1, -1):
+        if quiet[j]:
+            quiet_run += 1
+        else:
+            break
+    # 蛰伏占比：近 ~40 日(240 根)里有多少时间在自身低波动状态 -> 衡量"蛰伏了多久"
+    last240q = quiet[-240:] if n >= 240 else quiet
+    quiet_frac = float(np.mean(last240q)) if last240q.size else 0.0
+    # base_qual：区间蛰伏占比为主(七成) + 当前连续安静为辅(三成)
+    base_qual = max(0.0, min(1.0, 0.70 * quiet_frac + 0.30 * min(1.0, quiet_run / 40.0)))
+    dormancy_days = round(quiet_frac * 40.0, 1)   # 近 40 日中安静占比折算的蛰伏天数
+    hi20 = float(np.max(win)); lo20 = float(np.min(win))
+    rng20 = hi20 - lo20
+    pos_in_range = (float(close[-1]) - lo20) / rng20 if rng20 > 0 else 0.5
+    zone = ("support" if pos_in_range < 0.35
+            else ("resistance" if pos_in_range > 0.65 else "mid"))
     base = sym[:-4] if sym.endswith("USDT") else sym
     stable = (base in STABLE_SET) or (0.90 <= close[-1] <= 1.10)
     stock = base in STOCK_SET
@@ -595,12 +650,19 @@ def score_coin(sym, market="spot", force_fetch=False):
             score += max(0.0, (tightness - 0.80)) * 120      # tighter range = better
             if vol_tick:
                 score += 28                                  # early volume pick-up = about to go (埋伏★)
+                score += wake_q * 12                         # sustained wake = higher conviction
+            score += base_qual * 20                          # long hibernation = textbook 蛰伏
             if pv is not None and -0.15 <= pv <= 0.45:
                 score += 8                                   # near MA99, not already pumped
+            # 支撑区位偏好：在支撑(区间下沿)横盘最好；在压力(上沿)横盘危险 -> 软惩罚
+            if zone == "support":
+                score += 10
+            elif zone == "resistance":
+                score -= 6
             score = min(98, score)
-            reason = (f"coiling {flat_run} bars, range {range_w*100:.1f}% wide, "
-                      f"vol_tick={vol_tick}, 20d swing {swing:.0%}, price vs MA99={pv*100:+.0f}%" if pv is not None
-                      else f"coiling {flat_run} bars, range {range_w*100:.1f}% wide, vol_tick={vol_tick}")
+            reason = (f"蛰伏 {dormancy_days}d·{zone}区·量能{wake_q:.0%}抬头, 横盘 {flat_run} 根, "
+                      f"振幅 {range_w*100:.1f}%, 20d 波幅 {swing:.0%}, 价 vs MA99={pv*100:+.0f}%" if pv is not None
+                      else f"蛰伏 {dormancy_days}d·{zone}区·量能{wake_q:.0%}抬头, 横盘 {flat_run} 根, 振幅 {range_w*100:.1f}%")
         elif (swing >= LITE_GATE and flat_run >= LITE_MIN_FLAT
               and range_w <= LITE_MAX_RANGE and pv is not None
               and LITE_PV_WINDOW[0] <= pv <= LITE_PV_WINDOW[1]):
@@ -612,18 +674,25 @@ def score_coin(sym, market="spot", force_fetch=False):
             score += min(12.0, max(0.0, (tightness - 0.80)) * 120)
             if vol_tick:
                 score += 20                                  # 次级埋伏★
+                score += wake_q * 8
+            score += base_qual * 14                          # long hibernation = textbook 蛰伏
             score += 8                                       # near MA99 is REQUIRED here
+            if zone == "support":
+                score += 8
+            elif zone == "resistance":
+                score -= 5
             score = min(78, score)
-            reason = (f"lite coiling {flat_run} bars, range {range_w*100:.1f}% wide, "
-                      f"vol_tick={vol_tick}, 20d swing {swing:.0%} (below main gate), "
-                      f"price vs MA99={pv*100:+.0f}%")
+            reason = (f"lite 蛰伏 {dormancy_days}d·{zone}区·量能{wake_q:.0%}抬头, "
+                      f"横盘 {flat_run} 根, 振幅 {range_w*100:.1f}%, 20d 波幅 {swing:.0%}, "
+                      f"价 vs MA99={pv*100:+.0f}%")
         else:
             label, score, reason = "LOW_VOL", 0, f"dead-flat / low-vol (20d swing {swing:.0%}) - skip"
 
     spark = [round(float(x), 6) for x in close[-120:]]
     # base potential (no funding/OI yet — the monitor recomputes after enrich)
     _pot_src = dict(sym=sym, label=label, swing=swing, flat_run=flat_run,
-                    range_w=range_w, pv=pv, tbuy_ratio=tbuy_ratio, cvd_7d=cvd_7d)
+                    range_w=range_w, pv=pv, tbuy_ratio=tbuy_ratio, cvd_7d=cvd_7d,
+                    base_qual=base_qual, zone=zone)
     return dict(
         sym=sym, label=label, stage=s, score=round(score, 1), reason=reason,
         potential=(0 if label == "EXTENDED" else potential_of(_pot_src)),
@@ -632,6 +701,8 @@ def score_coin(sym, market="spot", force_fetch=False):
         ma99_1h=levels["ma99_1h"],
         flat_run=flat_run, range_w=round(range_w, 4), vol_tick=vol_tick, swing=round(swing, 3),
         pv=(round(pv, 4) if pv is not None else None),
+        base_qual=round(base_qual, 3), wake_q=round(wake_q, 3),
+        zone=zone, pos_in_range=round(pos_in_range, 3), dormancy_days=dormancy_days,
         launch_recency=launch_recency, day_move=round(day_move, 4),
         tbuy_ratio=(round(tbuy_ratio, 3) if tbuy_ratio is not None else None),
         cvd_7d=(round(cvd_7d, 3) if cvd_7d is not None else None),
