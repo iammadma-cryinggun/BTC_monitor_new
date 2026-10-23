@@ -977,7 +977,10 @@ class Monitor:
                          if rec.get("vt_since") else 0.0)
             except Exception:
                 _el_h = 0.0
-            rec["vt_confirmed"] = bool(rec["vt_streak"] >= 2
+            # 2026-10-23 扩展闸门：EXTENDED（已涨过/已起跑）的币即使量能确认
+            # 也不算 ✅可入场——避免把"已经 pump 的币"当成早期埋伏目标。
+            rec["vt_confirmed"] = bool(rec.get("label") == "COILING"
+                                       and rec["vt_streak"] >= 2
                                        and _el_h >= CONFIRM_MIN_H)
             # 大盘 context for gate messages = ENVIRONMENT regime (4h/1d,
             # matches the holding window); fall back to the 15m regime only

@@ -32,8 +32,8 @@ tmpdir = tempfile.mkdtemp()
 PP = os.path.join(tmpdir, "paper.json")
 
 
-def scan(ranked, dt, tracker_entries=None):
-    return paper.on_scan(ranked, now=T0 + dt, path=PP,
+def scan(ranked, dt, tracker_entries=None, path=PP):
+    return paper.on_scan(ranked, now=T0 + dt, path=path,
                          tracker_entries=tracker_entries or [])
 
 
@@ -70,12 +70,16 @@ check("gate: 成熟度门槛未过(flat=0/range=30%) 不买",
       not any(e[0] == "enter" for e in ev))
 bad_hist = [
     dict(sym="FFFUSDT", ts="2026-09-01T00:00:00+00:00", status="pre_fail",
-         peak_gain=-0.2, final_ts="2026-09-20T00:00:00+00:00"),
+         peak_gain=-0.2, final_ts="2026-09-20T00:00:00+00:00", source="live"),
     dict(sym="FFFUSDT", ts="2026-09-25T00:00:00+00:00", status="pre_fail",
-         peak_gain=-0.2, final_ts="2026-10-10T00:00:00+00:00"),
+         peak_gain=-0.2, final_ts="2026-10-10T00:00:00+00:00", source="live"),
 ]
-st, ev = scan([cand("FFFUSDT", 1.0)], 9 * H, tracker_entries=bad_hist)
-check("filter: 连败≥2 不买", not any(e[0] == "enter" for e in ev))
+# 2026-10-23 软惩罚：真实连败≥2 不再硬拦截，仍可作为候选并开仓（仅降权）。
+# 用独立 state 文件，避免污染共享 PP（否则后续 stop/cap 测试状态被带偏）。
+FFF_PP = os.path.join(tmpdir, "paper_fff.json")
+st, ev = scan([cand("FFFUSDT", 1.0)], 9 * H, tracker_entries=bad_hist, path=FFF_PP)
+check("filter: 连败≥2 不再硬拦截（软惩罚·仍可开仓）",
+      any(e[0] == "enter" and e[1] == "FFFUSDT" for e in ev))
 
 # ---------- 5. stop-loss: 平仓且同轮不回补（边沿触发核心用例） ----------
 st, ev = scan([cand("AAAUSDT", 0.79)], 10 * H)
@@ -197,9 +201,12 @@ real_hist = [
          peak_gain=-0.2, final_ts="2026-10-10T00:00:00+00:00", source="live"),
 ]
 cands_r, avoided_r = paper._candidates([cand("FFFUSDT", 1.0)], real_hist)
-check("backfill: 真实连败≥2 仍硬拦截", len(cands_r) == 0)
-check("backfill: 真实输家原因标注确认输家",
-      any(a[0] == "FFFUSDT" and "确认输家" in a[1] for a in avoided_r))
+# 2026-10-23 软惩罚：真实连败≥2 不再硬拦截，仍入候选但带软惩罚标记
+check("backfill: 真实连败≥2 不再硬拦截（软惩罚·仍入候选）", len(cands_r) == 1)
+check("backfill: 真实连败≥2 候选带软惩罚标记(_ls_penalty)",
+      cands_r[0][0].get("_ls_penalty") == 2)
+check("backfill: 真实连败≥2 不再进硬拦截透明行",
+      not any(a[0] == "FFFUSDT" and "确认输家" in a[1] for a in avoided_r))
 # on_scan 应把回避候选写进 last_avoided（透明行数据源）
 st_bf, _ = scan([cand("AKEUSDT", 1.0)], timedelta(days=46, hours=10),
                 tracker_entries=bf_hist)
@@ -232,10 +239,12 @@ bt_skip = [
 ]
 bt2 = paper.backtest(bt_skip, days=30, initial=10000.0,
                     now=datetime(2026, 10, 23, tzinfo=timezone.utc))
-check("backtest: 连败后的回合被纪律跳过（仅结算亏损回合）", bt2["n_trades"] == 2)
+# 2026-10-23 软惩罚：真实连败≥2 不再硬跳过，三回合全回放（两输一赢）
+check("backtest: 连败≥2 不再硬跳过（3 回合全回放）", bt2["n_trades"] == 3)
 skipped = [t for t in bt2["trades"] if t.get("skipped")]
-check("backtest: 存在被纪律过滤跳过的回合", any("纪律过滤" in (t.get("skipped") or "") for t in skipped))
-check("backtest: 跳过赢家回合·亏损回合照常结算", abs(bt2["final_equity"] - 9604) < 1)
+check("backtest: 真实连败不再触发纪律过滤跳过", len(skipped) == 0)
+# 两笔 -20% 止损 + 一笔 +30% 赢 = 10000*0.98*0.98*1.03 = 9892.12（每笔按 10% 当前权益复利）
+check("backtest: 全回放净值 = 10000*0.98^2*1.03", abs(bt2["final_equity"] - 9892.12) < 1)
 
 fails = [n for n, ok in checks if not ok]
 print()

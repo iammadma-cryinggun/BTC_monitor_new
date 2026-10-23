@@ -183,10 +183,12 @@ def _candidates(ranked, tracker_entries):
     优先级：上轮胜 > 新面孔 > 上轮败；同级按证据分（ev_pts→potential→score）。
     返回 (out, avoided)：avoided 是「信号达标却被纪律拦下」的候选，供模拟持仓卡
     的透明行展示（本轮回避的 ✅候选 + 原因）。
-    纪律过滤（2026-10-22 backfill 修复）：
-      - 真实连败≥2 → 确认输家，硬拦截；
-      - 全回填战绩（样本不足·低置信）→ 不按输家硬拦截，但按用户指令
-        「样本不足→跳过」，仅标注原因，不再伪称「连败N轮」错杀真涨币。"""
+    纪律过滤（2026-10-22 backfill 修复 + 2026-10-23 软惩罚）：
+      - 真实连败≥2 → 不再硬拦截（过往战绩不预测下一笔独立 setup，两次失败
+        常是基部震仓、第三次才是真突破）；改为软惩罚（sort_key 降权），
+        仍可作为候选，仅排序垫后。
+      - 全回填战绩（样本不足·低置信）→ 按用户指令「样本不足→跳过」，
+        仅标注原因，不伪称「连败N轮」错杀真涨币。"""
     import insights
     out = []
     for r in ranked or []:
@@ -201,14 +203,17 @@ def _candidates(ranked, tracker_entries):
             real_ls = h.get("lose_streak_real") or 0
             all_bf = h.get("all_backfill")
             rounds = h.get("rounds") or 0
-            if real_ls >= 2:
-                avoided.append((r["sym"], "连败≥2（真实战绩·确认输家）"))
-                continue
+            # 2026-10-23 软惩罚（用户指令：涨跌不该当硬门槛）。
+            # 真实连败≥2 不再硬拦截——同一币的过往战绩不预测下一笔独立 setup；
+            # 两次失败很可能正是基部里的震仓，第三次才是真突破（本策略想抓的）。
+            # 改为降权：仍可作为候选，但排序垫后；只有容量/边沿用尽才落选。
             if all_bf and rounds > 0:
                 avoided.append((r["sym"], "样本不足·回填战绩不可信·待核实"))
                 continue
             r = dict(r)
             r["_hist"] = h
+            if real_ls >= 2:
+                r["_ls_penalty"] = real_ls   # 软惩罚标记，sort_key 里扣分
             filtered.append((r, price))
         out = filtered
     except Exception:
@@ -222,7 +227,9 @@ def _candidates(ranked, tracker_entries):
         pts = r.get("ev_pts")
         if not isinstance(pts, (int, float)):
             pts = r.get("potential") if isinstance(r.get("potential"), (int, float)) else (r.get("score") or 0)
-        return (tier, -pts)
+        # 软惩罚：真实连败≥2 每轮 -10 优先级（仅降权，不剔除）
+        pen = (r.get("_ls_penalty") or 0) * 10
+        return (tier, -(pts - pen))
 
     out.sort(key=sort_key)
     return out, avoided
@@ -353,7 +360,8 @@ def snapshot(ranked=None, path=PAPER_PATH):
 # 近 N 天回测（功能②，2026-10-23 用户指令：「回测近30天，看1万能变多少」）
 # 把 tracker 里已终结的回合按 final_ts 时间轴重放，套用与纸面组合一致的纪律：
 #   - 仓位 = 当时净值的 10%（与 live 单笔口径一致），最多 5 仓并发；
-#   - 纪律过滤：真实连败≥2 或 全回填(样本不足) 的回合跳过（与 _candidates 同口径）；
+#   - 纪律过滤：仅全回填(样本不足) 的回合跳过（与 _candidates 同口径；
+#     真实连败≥2 自 2026-10-23 起改为软惩罚，不再硬跳过）；
 #   - 每笔收益按纪律结算：赢/大赢 +30%（减半+保本，上限按 +30%）、弱 +10%、
 #     破位 -20%、miss/timeout 按实际峰值（通常很小）。
 # 说明：回填回合缺精确 entry/exit 窗口，并发按 final_ts 相邻结算近似；这是
@@ -426,10 +434,11 @@ def backtest(entries, days=30, initial=INITIAL_CAPITAL, now=None):
         prior_hist = [e for e in prior if _k(e) < close_ts]
         if prior_hist:
             h = insights.coin_history(prior_hist, sym)
-            real_ls = h.get("lose_streak_real") or 0
             all_bf = h.get("all_backfill")
-            if real_ls >= 2 or (all_bf and (h.get("rounds") or 0) > 0):
-                trades.append({"sym": sym, "skipped": "纪律过滤(连败/样本不足)"})
+            # 2026-10-23：真实连败≥2 不再硬跳过（与 _candidates 同口径软惩罚）；
+            # 仅全回填（样本不足·低置信）仍跳过。
+            if all_bf and (h.get("rounds") or 0) > 0:
+                trades.append({"sym": sym, "skipped": "纪律过滤(样本不足)"})
                 continue
         if len(open_pos) >= MAX_POS:
             trades.append({"sym": sym, "skipped": "满仓"})

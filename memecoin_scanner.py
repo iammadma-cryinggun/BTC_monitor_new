@@ -72,6 +72,13 @@ LITE_GATE = 1.12        # 20d swing must at least reach this (12%)
 LITE_MIN_FLAT = 20      # must coil >= 20 4h bars (~3.3 days), stricter than main tier
 LITE_MAX_RANGE = 0.25   # last-15-bar range <= 25%
 LITE_PV_WINDOW = (-0.25, 0.15)  # price vs MA99: hugging/below it (grinding at lows)
+# Extension gate (2026-10-23): a coin in a tight S1 coil is only a good
+# "埋伏" target if it is still EARLY — i.e. coiling near a base, not pausing
+# at the top after a pump. The stage detector only sees local 15-bar flatness
+# and has no position awareness, so coins that already ran +90% and then pause
+# in a tight range get mislabeled S1/COILING. Gate them out as EXTENDED.
+EXTEND_PV = 0.25     # price > +25% above 4h MA99 (~16d mean) => already stretched
+EXTEND_DAY = 0.20    # > +20% in ~1 day => already running
 
 # curated Binance USD-M FUTURES meme / low-cap perpetual universe
 FUTURES_UNIVERSE = [
@@ -577,7 +584,11 @@ def score_coin(sym, market="spot", force_fetch=False):
             label, score = "LAUNCHED", 38
             reason = f"launched {launch_recency} bars ago; momentum may be fading"
     elif s == "S1":
-        if swing >= SWING_GATE:
+        if (pv is not None and pv > EXTEND_PV) or day_move > EXTEND_DAY:
+            label, score, reason = "EXTENDED", 0, (
+                f"already pumped: price {pv*100:+.0f}% vs MA99, "
+                f"{day_move*100:+.0f}% on day — too late / high risk")
+        elif swing >= SWING_GATE:
             label = "COILING"
             score = 35
             score += min(22, flat_run * 1.6)                 # longer coil = better
@@ -615,7 +626,7 @@ def score_coin(sym, market="spot", force_fetch=False):
                     range_w=range_w, pv=pv, tbuy_ratio=tbuy_ratio, cvd_7d=cvd_7d)
     return dict(
         sym=sym, label=label, stage=s, score=round(score, 1), reason=reason,
-        potential=potential_of(_pot_src),
+        potential=(0 if label == "EXTENDED" else potential_of(_pot_src)),
         price=levels["price"],
         ma25_4h=levels["ma25_4h"], ma99_4h=ma99,
         ma99_1h=levels["ma99_1h"],
